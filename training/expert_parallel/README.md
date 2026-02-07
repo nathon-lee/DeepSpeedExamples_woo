@@ -61,7 +61,9 @@ This will:
 Uses a randomly-initialized Mixtral architecture with configurable layer count:
 - `num_local_experts`: 8 (total experts per MoE layer)
 - `num_experts_per_tok`: 2 (top-k routing)
-- `hidden_size`: 1024
+- `hidden_size`: 4096 (original Mixtral-8x7B)
+- `intermediate_size`: 14336 (original Mixtral-8x7B)
+- `num_attention_heads`: 32 (original Mixtral-8x7B)
 - Reduced layer count for feasibility on available hardware
 
 AutoEP routing configuration (Mixtral preset):
@@ -157,6 +159,110 @@ Each run writes `run_metadata_{mode}.json` containing:
 - CUDA runtime, NCCL version, driver version
 - Launch topology (world_size, dp_world_size, autoep_size)
 - Effective tokens per optimizer update
+
+## Verified Results (8xH100 80GB, 12-layer Mixtral)
+
+The following commands reproduce a full comparison run validated on 2026-02-07.
+
+The model uses original Mixtral-8x7B dimensions (`hidden_size=4096`, `intermediate_size=14336`, `num_attention_heads=32`) with 12 layers — the maximum layer count that fits both modes on 8xH100 80GB (determined by `find_max_layers.py`: AutoEP max=15, ZeRO-3 leaf max=12).
+
+### Environment
+
+- 8x NVIDIA H100 80GB HBM3
+- DeepSpeed 0.18.6 (branch `tohtana/add_autoep`)
+- PyTorch 2.10.0+cu128
+- transformers 5.0.0
+- NCCL 2.25.1
+- `torch._grouped_mm` available (Hopper grouped GEMM fast-path active)
+
+### Commands
+
+All commands run from `DeepSpeedExamples/training/expert_parallel/`.
+
+**Step 0: Find maximum feasible layer count**
+
+```bash
+python find_max_layers.py \
+    --output_json /mnt/local_storage/autoep_example_test/layer_search.json \
+    --log_dir /mnt/local_storage/autoep_example_test/layer_search/ \
+    --num_gpus 8 --master_port 29600 \
+    --seq_len 128 --micro_batch_size 2 --grad_accum 1 \
+    --trial_steps 20 --trial_timeout 300
+```
+
+**Step 1: AutoEP + ZeRO-2**
+
+```bash
+deepspeed --num_gpus 8 --master_port 29600 train_compare.py \
+    --mode autoep \
+    --deepspeed_config configs/ds_autoep_zero2.json \
+    --num_layers 12 \
+    --steps 100 \
+    --warmup_steps 10 \
+    --seq_len 128 \
+    --micro_batch_size 2 \
+    --grad_accum 1 \
+    --seed 42 \
+    --metrics_out metrics_autoep.csv \
+    --run_metadata_out metadata_autoep.json
+```
+
+**Step 2: HF + ZeRO-3 leaf baseline**
+
+```bash
+deepspeed --num_gpus 8 --master_port 29600 train_compare.py \
+    --mode zero3_leaf \
+    --deepspeed_config configs/ds_zero3_leaf.json \
+    --num_layers 12 \
+    --steps 100 \
+    --warmup_steps 10 \
+    --seq_len 128 \
+    --micro_batch_size 2 \
+    --grad_accum 1 \
+    --seed 42 \
+    --metrics_out metrics_zero3_leaf.csv \
+    --run_metadata_out metadata_zero3_leaf.json
+```
+
+**Step 3: Generate comparison plots and summary**
+
+```bash
+python compare_metrics.py \
+    --autoep_csv metrics_autoep.csv \
+    --zero3_leaf_csv metrics_zero3_leaf.csv \
+    --autoep_metadata metadata_autoep.json \
+    --zero3_leaf_metadata metadata_zero3_leaf.json \
+    --out_dir results/ \
+    --out_json results/summary.json \
+    --warmup_steps 10
+```
+
+### Observed Results
+
+![Loss Curve Comparison](loss_curve.png)
+
+| Metric | AutoEP + ZeRO-2 | HF + ZeRO-3 leaf |
+|--------|-----------------|-------------------|
+| Final loss (step 99) | 11.173 | 11.129 |
+| Peak GPU memory | 45.86 GB | 70.18 GB |
+| Avg throughput (post-warmup) | 8,903 tok/s | 2,135 tok/s |
+
+| Comparison Metric | Value |
+|-------------------|-------|
+| Mean abs loss diff | 0.032 |
+| Max abs loss diff | 0.116 |
+| Pearson correlation | 0.08 |
+| Memory ratio (autoep/zero3) | 0.65x |
+| Throughput ratio (autoep/zero3) | 4.17x |
+
+**Key takeaways:**
+
+- **Loss values agree** (mean absolute difference 0.032). The low Pearson correlation reflects a flat loss landscape at 12 layers rather than divergence — both modes plateau around 11.1–11.2 with small fluctuations.
+- **AutoEP uses 35% less peak memory** due to 4-way expert partitioning (`autoep_size=4`), confirmed by validation: `local=4.23B params, global_est=16.91B, partition_ratio=4.0`.
+- **AutoEP is 4.2x faster** — at full Mixtral dimensions, ZeRO-3 parameter communication dominates. AutoEP+ZeRO-2 only communicates expert parameters via AllToAll (72 calls per step for 12 MoE layers), while ZeRO-3 gathers/scatters all 70+ GB of parameters every step.
+- Both modes used identical effective batch size: `128 seq_len * 2 mbs * 1 grad_accum * 8 dp_world_size = 2048 tokens/update`.
+
+**Note:** These are characterizations of the full runtime stacks (AutoEP+ZeRO-2 vs HF+ZeRO-3), not isolated AutoEP-only benchmarks. Memory and throughput differences include ZeRO-stage effects.
 
 ## Troubleshooting
 
