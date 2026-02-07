@@ -1,0 +1,4 @@
+transformers>=4.44.0
+deepspeed>=0.16.0
+matplotlib>=3.5.0
+torch>=2.4.0
