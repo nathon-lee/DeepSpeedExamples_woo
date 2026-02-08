@@ -17,10 +17,20 @@
     "optimizer": {
         "type": "AdamW",
         "params": {
-            "lr": 1e-4,
+            "lr": 3e-3,
             "betas": [0.9, 0.999],
             "eps": 1e-8,
             "weight_decay": 0.01
+        }
+    },
+    "scheduler": {
+        "type": "WarmupCosineLR",
+        "params": {
+            "total_num_steps": 1000,
+            "warmup_min_ratio": 0,
+            "warmup_num_steps": 100,
+            "cos_min_ratio": 0.001,
+            "warmup_type": "linear"
         }
     },
     "train_micro_batch_size_per_gpu": 2,

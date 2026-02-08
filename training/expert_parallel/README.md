@@ -36,19 +36,19 @@ cd /path/to/DeepSpeed && pip install -e .
 deepspeed --num_gpus 8 train_compare.py \
     --mode autoep \
     --deepspeed_config configs/ds_autoep_zero2.json \
-    --num_layers 4 --steps 50
+    --num_layers 4 --steps 1000
 
 # HF + ZeRO-3 leaf (baseline)
 deepspeed --num_gpus 8 train_compare.py \
     --mode zero3_leaf \
     --deepspeed_config configs/ds_zero3_leaf.json \
-    --num_layers 4 --steps 50
+    --num_layers 4 --steps 1000
 ```
 
 ### Run full comparison pipeline
 
 ```bash
-bash run_compare.sh --num_gpus 8 --steps 50 --out_dir /mnt/local_storage/autoep_results
+bash run_compare.sh --num_gpus 8 --steps 1000 --out_dir /mnt/local_storage/autoep_results
 ```
 
 This will:
@@ -88,7 +88,7 @@ AutoEP routing configuration (Mixtral preset):
 - `zero_optimization.stage: 3`
 - `zero_optimization.leaf_module.classes`: `["transformers.models.mixtral.modeling_mixtral.MixtralSparseMoeBlock"]`
 
-Both configs use identical AdamW optimizer settings (lr=1e-4, weight_decay=0.01).
+Both configs use identical AdamW optimizer settings (lr=3e-3, weight_decay=0.01) with a `WarmupCosineLR` scheduler (100-step linear warmup, cosine decay to 0.1% of peak over 1000 steps).
 
 ## Important Constraints
 
@@ -197,8 +197,8 @@ deepspeed --num_gpus 8 --master_port 29600 train_compare.py \
     --mode autoep \
     --deepspeed_config configs/ds_autoep_zero2.json \
     --num_layers 12 \
-    --steps 100 \
-    --warmup_steps 10 \
+    --steps 1000 \
+    --warmup_steps 50 \
     --seq_len 128 \
     --micro_batch_size 2 \
     --grad_accum 1 \
@@ -214,8 +214,8 @@ deepspeed --num_gpus 8 --master_port 29600 train_compare.py \
     --mode zero3_leaf \
     --deepspeed_config configs/ds_zero3_leaf.json \
     --num_layers 12 \
-    --steps 100 \
-    --warmup_steps 10 \
+    --steps 1000 \
+    --warmup_steps 50 \
     --seq_len 128 \
     --micro_batch_size 2 \
     --grad_accum 1 \
@@ -234,7 +234,7 @@ python compare_metrics.py \
     --zero3_leaf_metadata metadata_zero3_leaf.json \
     --out_dir results/ \
     --out_json results/summary.json \
-    --warmup_steps 10
+    --warmup_steps 50
 ```
 
 ### Observed Results
@@ -243,22 +243,22 @@ python compare_metrics.py \
 
 | Metric | AutoEP + ZeRO-2 | HF + ZeRO-3 leaf |
 |--------|-----------------|-------------------|
-| Final loss (step 99) | 11.173 | 11.129 |
-| Peak GPU memory | 45.86 GB | 70.18 GB |
-| Avg throughput (post-warmup) | 8,903 tok/s | 2,135 tok/s |
+| Final loss (step 999) | 10.374 | 10.374 |
+| Peak GPU memory | 49.41 GB | 75.36 GB |
+| Avg throughput (post-warmup) | 9,054 tok/s | 2,138 tok/s |
 
 | Comparison Metric | Value |
 |-------------------|-------|
-| Mean abs loss diff | 0.032 |
-| Max abs loss diff | 0.116 |
-| Pearson correlation | 0.08 |
-| Memory ratio (autoep/zero3) | 0.65x |
-| Throughput ratio (autoep/zero3) | 4.17x |
+| Mean abs loss diff | 0.131 |
+| Max abs loss diff | 5.584 |
+| Pearson correlation | 0.93 |
+| Memory ratio (autoep/zero3) | 0.66x |
+| Throughput ratio (autoep/zero3) | 4.23x |
 
 **Key takeaways:**
 
-- **Loss values agree** (mean absolute difference 0.032). The low Pearson correlation reflects a flat loss landscape at 12 layers rather than divergence — both modes plateau around 11.1–11.2 with small fluctuations.
-- **AutoEP uses 35% less peak memory** due to 4-way expert partitioning (`autoep_size=4`), confirmed by validation: `local=4.23B params, global_est=16.91B, partition_ratio=4.0`.
+- **Both modes converge to the same final loss** (~10.374) with strong correlation (Pearson 0.93). The loss curves show clear convergence from ~12.7 down to ~10.4 over 1000 steps with cosine LR decay (lr=3e-3, 100-step warmup). The high max abs diff (5.58) is from early transient spikes during warmup, not from steady-state divergence.
+- **AutoEP uses 34% less peak memory** due to 4-way expert partitioning (`autoep_size=4`), confirmed by validation: `local=4.23B params, global_est=16.91B, partition_ratio=4.0`.
 - **AutoEP is 4.2x faster** — at full Mixtral dimensions, ZeRO-3 parameter communication dominates. AutoEP+ZeRO-2 only communicates expert parameters via AllToAll (72 calls per step for 12 MoE layers), while ZeRO-3 gathers/scatters all 70+ GB of parameters every step.
 - Both modes used identical effective batch size: `128 seq_len * 2 mbs * 1 grad_accum * 8 dp_world_size = 2048 tokens/update`.
 
