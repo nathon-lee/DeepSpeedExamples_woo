@@ -30,6 +30,20 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--warmup_steps", type=int, default=5)
     parser.add_argument("--max_mean_abs_diff", type=float, default=None)
     parser.add_argument("--min_post_warmup_steps", type=int, default=10)
+    hash_group = parser.add_mutually_exclusive_group()
+    hash_group.add_argument(
+        "--require_same_init_hash",
+        dest="require_same_init_hash",
+        action="store_true",
+        help="Require matching non-empty init_weights_sha256 in both metadata files",
+    )
+    hash_group.add_argument(
+        "--no_require_same_init_hash",
+        dest="require_same_init_hash",
+        action="store_false",
+        help="Allow comparison without enforcing matching init_weights_sha256",
+    )
+    parser.set_defaults(require_same_init_hash=True)
     return parser.parse_args()
 
 
@@ -64,10 +78,11 @@ def pearson_correlation(x: list[float], y: list[float]) -> float | None:
 
 
 def validate_compatibility(
-    autoep_meta: dict, zero3_meta: dict
-) -> tuple[bool, list[str]]:
+    autoep_meta: dict, zero3_meta: dict, require_same_init_hash: bool
+) -> tuple[bool, list[str], list[str], bool | None, str | None, str | None]:
     """Check if runs are comparable."""
     issues = []
+    warnings = []
 
     # Check num_layers
     a_layers = autoep_meta.get("args", {}).get("num_layers")
@@ -99,7 +114,42 @@ def validate_compatibility(
     if a_ws != z_ws:
         issues.append(f"world_size mismatch: autoep={a_ws}, zero3={z_ws}")
 
-    return len(issues) == 0, issues
+    a_init_hash = autoep_meta.get("init_weights_sha256")
+    z_init_hash = zero3_meta.get("init_weights_sha256")
+    same_init_hash = (
+        a_init_hash == z_init_hash if a_init_hash and z_init_hash else None
+    )
+
+    if require_same_init_hash:
+        if not a_init_hash or not z_init_hash:
+            issues.append(
+                "init_weights_sha256 missing in one or both metadata files "
+                "(required by --require_same_init_hash)."
+            )
+        elif a_init_hash != z_init_hash:
+            issues.append(
+                f"init_weights_sha256 mismatch: autoep={a_init_hash}, zero3={z_init_hash}"
+            )
+    else:
+        if not a_init_hash or not z_init_hash:
+            warnings.append(
+                "init_weights_sha256 missing in one or both metadata files; "
+                "init-weight provenance is not verified."
+            )
+        elif a_init_hash != z_init_hash:
+            warnings.append(
+                "init_weights_sha256 mismatch detected but allowed by "
+                "--no_require_same_init_hash."
+            )
+
+    return (
+        len(issues) == 0,
+        issues,
+        warnings,
+        same_init_hash,
+        a_init_hash,
+        z_init_hash,
+    )
 
 
 def try_plot(
@@ -217,7 +267,18 @@ def main():
     zero3_meta = load_metadata(args.zero3_leaf_metadata)
 
     # Validate compatibility
-    compatible, compat_issues = validate_compatibility(autoep_meta, zero3_meta)
+    (
+        compatible,
+        compat_issues,
+        compat_warnings,
+        same_init_hash,
+        init_hash_autoep,
+        init_hash_zero3_leaf,
+    ) = validate_compatibility(
+        autoep_meta,
+        zero3_meta,
+        require_same_init_hash=args.require_same_init_hash,
+    )
 
     # Filter by warmup steps
     autoep_rows = [r for r in autoep_rows if int(r["step"]) >= args.warmup_steps]
@@ -299,6 +360,11 @@ def main():
     summary = {
         "compatible": compatible,
         "compatibility_issues": compat_issues,
+        "compatibility_warnings": compat_warnings,
+        "same_init_hash": same_init_hash,
+        "init_hash_autoep": init_hash_autoep,
+        "init_hash_zero3_leaf": init_hash_zero3_leaf,
+        "init_hash_required": args.require_same_init_hash,
         "loss_parity": {
             "mean_abs_diff": mean_abs_diff,
             "max_abs_diff": max_abs_diff,
@@ -361,6 +427,10 @@ def main():
     print(f"Compatible: {compatible}")
     if compat_issues:
         print(f"Issues: {compat_issues}")
+    if compat_warnings:
+        print(f"Warnings: {compat_warnings}")
+    print(f"Init hash required: {args.require_same_init_hash}")
+    print(f"Same init hash: {same_init_hash}")
     print(f"Aligned steps: {num_aligned}")
     print(f"Mean abs diff (loss): {mean_abs_diff}")
     print(f"Max abs diff (loss): {max_abs_diff}")
@@ -379,8 +449,8 @@ def main():
     if plots["throughput_bar"]:
         print(f"Throughput plot: {plots['throughput_bar']}")
 
-    # Exit with non-zero if threshold failed
-    if threshold_passed is False:
+    # Exit with non-zero for compatibility failures or threshold failure.
+    if not compatible or threshold_passed is False:
         sys.exit(1)
 
 

@@ -24,6 +24,7 @@ from transformers import AutoModelForCausalLM
 import deepspeed
 
 from data_utils import SyntheticBatchGenerator, build_mixtral_config
+from init_weights import load_init_weights_artifact, save_init_weights_artifact
 from metrics import MetricsLogger, reduce_loss, reduce_max, write_run_metadata
 from validation import (
     collect_run_metadata,
@@ -124,12 +125,66 @@ def parse_args() -> argparse.Namespace:
         help="Load checkpoint from this directory before training",
     )
     parser.add_argument(
+        "--save_init_weights",
+        type=str,
+        default=None,
+        help="Save pre-DeepSpeed init weights artifact (.safetensors)",
+    )
+    parser.add_argument(
+        "--load_init_weights",
+        type=str,
+        default=None,
+        help="Load pre-DeepSpeed init weights artifact (.safetensors)",
+    )
+    parser.add_argument(
+        "--init_weights_only",
+        action="store_true",
+        help="Save init weights artifact and exit before DeepSpeed initialization",
+    )
+    parser.add_argument(
         "--local_rank",
         type=int,
         default=-1,
         help="Local rank passed by deepspeed launcher",
     )
-    return parser.parse_args()
+    args = parser.parse_args()
+    validate_init_weight_args(args, parser)
+    return args
+
+
+def validate_init_weight_args(
+    args: argparse.Namespace, parser: argparse.ArgumentParser
+) -> None:
+    """Validate init-weights/checkpoint argument combinations."""
+    if args.init_weights_only and args.save_init_weights is None:
+        parser.error("--init_weights_only requires --save_init_weights.")
+
+    if args.init_weights_only and args.load_checkpoint is not None:
+        parser.error("--init_weights_only is incompatible with --load_checkpoint.")
+
+    if args.init_weights_only and args.save_checkpoint is not None:
+        parser.error("--init_weights_only is incompatible with --save_checkpoint.")
+
+    if args.load_init_weights is not None and args.load_checkpoint is not None:
+        parser.error("--load_init_weights is incompatible with --load_checkpoint.")
+
+    if args.save_init_weights is not None and args.load_init_weights is not None:
+        parser.error(
+            "--save_init_weights and --load_init_weights cannot be used together."
+        )
+
+    if args.save_init_weights is not None and not args.save_init_weights.endswith(
+        ".safetensors"
+    ):
+        parser.error("--save_init_weights path must end with '.safetensors'.")
+
+    if args.load_init_weights is not None:
+        if not args.load_init_weights.endswith(".safetensors"):
+            parser.error("--load_init_weights path must end with '.safetensors'.")
+        if not os.path.isfile(args.load_init_weights):
+            parser.error(
+                f"--load_init_weights file does not exist: {args.load_init_weights}"
+            )
 
 
 def load_ds_config(config_path: str) -> dict:
@@ -147,10 +202,18 @@ def main():
     if args.run_metadata_out is None:
         args.run_metadata_out = f"run_metadata_{args.mode}.json"
 
-    # Initialize distributed (deepspeed.initialize handles this, but we need rank for logging)
-    deepspeed.init_distributed()
-    rank = int(os.environ.get("RANK", 0))
-    world_size = int(os.environ.get("WORLD_SIZE", 1))
+    if args.init_weights_only:
+        rank = 0
+        world_size = 1
+    else:
+        # deepspeed.initialize handles distributed setup, but we need rank for logging
+        deepspeed.init_distributed()
+        rank = int(os.environ.get("RANK", 0))
+        world_size = int(os.environ.get("WORLD_SIZE", 1))
+        if torch.cuda.is_available():
+            local_rank_env = int(os.environ.get("LOCAL_RANK", args.local_rank))
+            if local_rank_env >= 0:
+                torch.cuda.set_device(local_rank_env)
 
     # Setup logging
     logging.basicConfig(
@@ -162,7 +225,8 @@ def main():
     random.seed(args.seed)
     np.random.seed(args.seed)
     torch.manual_seed(args.seed)
-    torch.cuda.manual_seed_all(args.seed)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed_all(args.seed)
     if args.deterministic:
         torch.use_deterministic_algorithms(True)
         torch.backends.cudnn.deterministic = True
@@ -256,6 +320,70 @@ def main():
     # Build model with random weights
     model = AutoModelForCausalLM.from_config(model_config)
 
+    init_weights_context = {
+        "init_weights_path": None,
+        "init_weights_sha256": None,
+        "init_weights_loaded": False,
+        "init_weights_schema_version": None,
+    }
+
+    # Optional: save pre-DeepSpeed init weights artifact
+    if args.save_init_weights is not None:
+        if args.init_weights_only or rank == 0:
+            init_weights_context = save_init_weights_artifact(
+                args.save_init_weights,
+                model,
+                args=args,
+                model_config=model_config,
+                rank=rank,
+            )
+            if rank == 0:
+                logger.info(
+                    f"Saved init weights artifact to {init_weights_context['init_weights_path']}"
+                )
+        if not args.init_weights_only and torch.distributed.is_initialized():
+            torch.distributed.barrier()
+
+    # Optional: load pre-DeepSpeed init weights artifact
+    if args.load_init_weights is not None:
+        if torch.distributed.is_initialized():
+            # Rank-0 validates readability and broadcasts result to all ranks.
+            read_ok = int(
+                rank == 0
+                and os.path.isfile(args.load_init_weights)
+                and os.access(args.load_init_weights, os.R_OK)
+            )
+            check = torch.tensor([read_ok], device=torch.cuda.current_device())
+            torch.distributed.broadcast(check, src=0)
+            if check.item() != 1:
+                logger.error(
+                    f"Init weights path is not readable on rank 0: {args.load_init_weights}"
+                )
+                sys.exit(2)
+            torch.distributed.barrier()
+
+        try:
+            init_weights_context = load_init_weights_artifact(
+                args.load_init_weights,
+                model,
+                args=args,
+                model_config=model_config,
+            )
+        except Exception as e:
+            logger.error(f"Failed to load init weights artifact: {e}")
+            sys.exit(2)
+        if rank == 0:
+            logger.info(
+                "Loaded init weights artifact "
+                f"{init_weights_context['init_weights_path']} "
+                f"(sha256={init_weights_context['init_weights_sha256']})"
+            )
+
+    if args.init_weights_only:
+        if rank == 0:
+            logger.info("init_weights_only completed successfully.")
+        return
+
     # Enable gradient checkpointing if requested (BEFORE deepspeed.initialize)
     if args.gradient_checkpointing == "on":
         model.gradient_checkpointing_enable()
@@ -346,7 +474,13 @@ def main():
     )
 
     # Collect run metadata
-    metadata = collect_run_metadata(args.mode, args, engine, val_result)
+    metadata = collect_run_metadata(
+        args.mode,
+        args,
+        engine,
+        val_result,
+        init_weights_context=init_weights_context,
+    )
 
     # Setup metrics logger
     metrics_logger = MetricsLogger(args.metrics_out, rank)

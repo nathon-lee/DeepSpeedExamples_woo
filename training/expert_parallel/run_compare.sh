@@ -6,8 +6,9 @@
 #
 # This script:
 #   1. Runs find_max_layers.py to determine largest feasible shared layer count
-#   2. Runs train_compare.py in both modes at the determined layer count
-#   3. Generates comparison plots and summary via compare_metrics.py
+#   2. Generates shared init weights artifact
+#   3. Runs train_compare.py in both modes at the determined layer count
+#   4. Generates comparison plots and summary via compare_metrics.py
 
 set -euo pipefail
 
@@ -28,6 +29,7 @@ OUT_DIR="/mnt/local_storage/autoep_results/$(date +%Y%m%d_%H%M%S)"
 ALLOW_UNTESTED=""
 DRY_RUN=false
 TRIAL_TIMEOUT=300
+INIT_WEIGHTS_PATH=""
 
 # Parse arguments
 while [[ $# -gt 0 ]]; do
@@ -48,6 +50,7 @@ while [[ $# -gt 0 ]]; do
         --allow_untested_versions) ALLOW_UNTESTED="--allow_untested_versions"; shift ;;
         --dry_run) DRY_RUN=true; shift ;;
         --trial_timeout) TRIAL_TIMEOUT="$2"; shift 2 ;;
+        --init_weights_path) INIT_WEIGHTS_PATH="$2"; shift 2 ;;
         *) echo "Unknown argument: $1"; exit 1 ;;
     esac
 done
@@ -70,6 +73,11 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "$SCRIPT_DIR"
 
 mkdir -p "$OUT_DIR"
+
+if [[ -z "$INIT_WEIGHTS_PATH" ]]; then
+    INIT_WEIGHTS_PATH="$OUT_DIR/init_weights.safetensors"
+fi
+INIT_WEIGHTS="$INIT_WEIGHTS_PATH"
 
 MANIFEST="$OUT_DIR/manifest.json"
 LAYER_SEARCH_JSON="$OUT_DIR/layer_search.json"
@@ -113,7 +121,7 @@ m['args'] = {
     'num_gpus': $NUM_GPUS, 'min_layers': $MIN_LAYERS, 'max_layers': $MAX_LAYERS,
     'steps': $STEPS, 'warmup_steps': $WARMUP_STEPS, 'trial_steps': $TRIAL_STEPS,
     'seq_len': $SEQ_LEN, 'micro_batch_size': $MICRO_BATCH_SIZE,
-    'grad_accum': $GRAD_ACCUM, 'seed': $SEED,
+    'grad_accum': $GRAD_ACCUM, 'seed': $SEED, 'init_weights_path': '$INIT_WEIGHTS',
 }
 m['dry_run'] = $( [[ "$DRY_RUN" == "true" ]] && echo "True" || echo "False" )
 "
@@ -200,7 +208,50 @@ m['stages'][-1]['exit_code'] = 0
 m['artifacts']['layer_search_json'] = '$LAYER_SEARCH_JSON'
 "
 
-echo "=== Step 2a: Final comparison - AutoEP ==="
+echo "=== Step 2: Prepare shared init weights artifact ==="
+update_manifest "$MANIFEST" "
+from datetime import datetime, timezone
+m['stages'].append({
+    'name': 'prepare_init_weights', 'status': 'running',
+    'started_at': datetime.now(timezone.utc).isoformat(),
+    'finished_at': None, 'exit_code': None, 'command': [], 'artifacts': {}
+})
+"
+
+conda run -n ds python train_compare.py \
+    --mode autoep \
+    --deepspeed_config configs/ds_autoep_zero2.json \
+    --num_layers "$L_FINAL" \
+    --seq_len "$SEQ_LEN" \
+    --micro_batch_size "$MICRO_BATCH_SIZE" \
+    --grad_accum "$GRAD_ACCUM" \
+    --seed "$SEED" \
+    $ALLOW_UNTESTED \
+    --init_weights_only \
+    --save_init_weights "$INIT_WEIGHTS"
+
+INIT_WEIGHTS_SHA256=$(conda run -n ds python -c "
+import hashlib
+path = '$INIT_WEIGHTS'
+h = hashlib.sha256()
+with open(path, 'rb') as f:
+    for chunk in iter(lambda: f.read(1024 * 1024), b''):
+        h.update(chunk)
+print(h.hexdigest())
+")
+
+update_manifest "$MANIFEST" "
+from datetime import datetime, timezone
+m['stages'][-1]['status'] = 'success'
+m['stages'][-1]['finished_at'] = datetime.now(timezone.utc).isoformat()
+m['stages'][-1]['exit_code'] = 0
+m['stages'][-1]['artifacts']['init_weights_path'] = '$INIT_WEIGHTS'
+m['stages'][-1]['artifacts']['init_weights_sha256'] = '$INIT_WEIGHTS_SHA256'
+m['artifacts']['init_weights_path'] = '$INIT_WEIGHTS'
+m['artifacts']['init_weights_sha256'] = '$INIT_WEIGHTS_SHA256'
+"
+
+echo "=== Step 3a: Final comparison - AutoEP ==="
 update_manifest "$MANIFEST" "
 from datetime import datetime, timezone
 m['stages'].append({
@@ -224,6 +275,7 @@ conda run -n ds deepspeed --num_gpus "$NUM_GPUS" --master_port "$AUTOEP_PORT" \
     --seed "$SEED" \
     $TARGET_TOKENS_ARG \
     $ALLOW_UNTESTED \
+    --load_init_weights "$INIT_WEIGHTS" \
     --metrics_out "$AUTOEP_CSV" \
     --run_metadata_out "$AUTOEP_META"
 
@@ -236,7 +288,7 @@ m['artifacts']['autoep_csv'] = '$AUTOEP_CSV'
 m['artifacts']['autoep_meta'] = '$AUTOEP_META'
 "
 
-echo "=== Step 2b: Final comparison - ZeRO-3 leaf ==="
+echo "=== Step 3b: Final comparison - ZeRO-3 leaf ==="
 update_manifest "$MANIFEST" "
 from datetime import datetime, timezone
 m['stages'].append({
@@ -260,6 +312,7 @@ conda run -n ds deepspeed --num_gpus "$NUM_GPUS" --master_port "$ZERO3_PORT" \
     --seed "$SEED" \
     $TARGET_TOKENS_ARG \
     $ALLOW_UNTESTED \
+    --load_init_weights "$INIT_WEIGHTS" \
     --metrics_out "$ZERO3_CSV" \
     --run_metadata_out "$ZERO3_META"
 
@@ -272,7 +325,7 @@ m['artifacts']['zero3_leaf_csv'] = '$ZERO3_CSV'
 m['artifacts']['zero3_leaf_meta'] = '$ZERO3_META'
 "
 
-echo "=== Step 3: Generate comparison ==="
+echo "=== Step 4: Generate comparison ==="
 update_manifest "$MANIFEST" "
 from datetime import datetime, timezone
 m['stages'].append({
@@ -289,7 +342,8 @@ conda run -n ds python compare_metrics.py \
     --zero3_leaf_metadata "$ZERO3_META" \
     --out_dir "$OUT_DIR" \
     --out_json "$SUMMARY_JSON" \
-    --warmup_steps "$WARMUP_STEPS"
+    --warmup_steps "$WARMUP_STEPS" \
+    --require_same_init_hash
 
 update_manifest "$MANIFEST" "
 from datetime import datetime, timezone

@@ -217,6 +217,7 @@ def collect_run_metadata(
     args: Any,
     engine: Any,
     validation_result: dict[str, Any],
+    init_weights_context: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Collect runtime metadata for reproducibility."""
     import torch
@@ -265,6 +266,12 @@ def collect_run_metadata(
     ga = getattr(args, "grad_accum", 1)
     effective_tokens = seq_len * mbs * ga * dp_ws
 
+    init_ctx = init_weights_context or {}
+    init_weights_path = init_ctx.get("init_weights_path")
+    init_weights_sha256 = init_ctx.get("init_weights_sha256")
+    init_weights_loaded = bool(init_ctx.get("init_weights_loaded", False))
+    init_weights_schema_version = init_ctx.get("init_weights_schema_version")
+
     return {
         "mode": mode,
         "deepspeed_git_sha": ds_sha,
@@ -285,4 +292,8 @@ def collect_run_metadata(
         "validation": validation_result,
         "args": {k: v for k, v in vars(args).items() if not k.startswith("_")},
         "allow_untested_versions": getattr(args, "allow_untested_versions", False),
+        "init_weights_path": init_weights_path,
+        "init_weights_sha256": init_weights_sha256,
+        "init_weights_loaded": init_weights_loaded,
+        "init_weights_schema_version": init_weights_schema_version,
     }

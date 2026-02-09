@@ -29,32 +29,63 @@ pip install -r requirements.txt
 cd /path/to/DeepSpeed && pip install -e .
 ```
 
-### Run individual modes
+### Run individual modes (same-init parity workflow)
+
+For correctness comparisons, seed parity alone is not enough. Generate one shared init-weights artifact and load it in both modes.
 
 ```bash
-# AutoEP + ZeRO-2
+# 1) Generate shared init weights artifact (single-process, no deepspeed launcher)
+python train_compare.py \
+    --mode autoep \
+    --deepspeed_config configs/ds_autoep_zero2.json \
+    --num_layers 4 \
+    --seed 42 \
+    --init_weights_only \
+    --save_init_weights /mnt/local_storage/autoep_results/init_weights.safetensors
+
+# 2) AutoEP + ZeRO-2
 deepspeed --num_gpus 8 train_compare.py \
     --mode autoep \
     --deepspeed_config configs/ds_autoep_zero2.json \
-    --num_layers 4 --steps 1000
+    --num_layers 4 \
+    --steps 1000 \
+    --load_init_weights /mnt/local_storage/autoep_results/init_weights.safetensors
 
-# HF + ZeRO-3 leaf (baseline)
+# 3) HF + ZeRO-3 leaf (baseline), loading the same artifact
 deepspeed --num_gpus 8 train_compare.py \
     --mode zero3_leaf \
     --deepspeed_config configs/ds_zero3_leaf.json \
-    --num_layers 4 --steps 1000
+    --num_layers 4 \
+    --steps 1000 \
+    --load_init_weights /mnt/local_storage/autoep_results/init_weights.safetensors
 ```
+
+The init artifact is mode-agnostic. You can generate it with either mode and load it in either mode because it stores pre-DeepSpeed HF model weights.
 
 ### Run full comparison pipeline
 
 ```bash
-bash run_compare.sh --num_gpus 8 --steps 1000 --out_dir /mnt/local_storage/autoep_results
+bash run_compare.sh \
+    --num_gpus 8 \
+    --steps 1000 \
+    --out_dir /mnt/local_storage/autoep_results \
+    --init_weights_path /mnt/local_storage/autoep_results/init_weights.safetensors
 ```
 
 This will:
 1. Binary-search for the maximum feasible layer count in both modes
-2. Run full training at the determined layer count
-3. Generate loss curve, memory, and throughput comparison plots
+2. Generate shared init weights once
+3. Run full training at the determined layer count in both modes with `--load_init_weights`
+4. Run `compare_metrics.py --require_same_init_hash` and generate loss/memory/throughput outputs
+
+### Init artifact storage guidance
+
+- Save init artifacts under `/mnt/local_storage/` (not your home dir).
+- Approximate artifact sizes for Mixtral dims in this example:
+  - 4-layer: ~1.3 GB
+  - 12-layer: ~3.8 GB
+  - 32-layer: ~12 GB
+- After a comparison finishes, the artifact is safe to delete because metadata and summary retain the SHA-256 provenance.
 
 ## Model
 
@@ -159,20 +190,27 @@ Each run writes `run_metadata_{mode}.json` containing:
 - CUDA runtime, NCCL version, driver version
 - Launch topology (world_size, dp_world_size, autoep_size)
 - Effective tokens per optimizer update
+- Init artifact provenance:
+  - `init_weights_path`
+  - `init_weights_sha256`
+  - `init_weights_loaded`
+  - `init_weights_schema_version`
+
+`compare_metrics.py` enforces matching init hashes by default (`--require_same_init_hash`). For legacy metadata without init hash fields, use `--no_require_same_init_hash`.
 
 ## Verified Results (8xH100 80GB, 12-layer Mixtral)
 
-The following commands reproduce a full comparison run validated on 2026-02-07.
+The following commands reproduce a full comparison run validated on 2026-02-09.
 
 The model uses original Mixtral-8x7B dimensions (`hidden_size=4096`, `intermediate_size=14336`, `num_attention_heads=32`) with 12 layers — the maximum layer count that fits both modes on 8xH100 80GB (determined by `find_max_layers.py`: AutoEP max=15, ZeRO-3 leaf max=12).
 
 ### Environment
 
 - 8x NVIDIA H100 80GB HBM3
-- DeepSpeed 0.18.6 (branch `tohtana/add_autoep`)
-- PyTorch 2.10.0+cu128
+- DeepSpeed 0.18.6+fd07c93a
+- PyTorch 2.8.0+cu128
 - transformers 5.0.0
-- NCCL 2.25.1
+- NCCL 2.27.3
 - `torch._grouped_mm` available (Hopper grouped GEMM fast-path active)
 
 ### Commands
@@ -190,7 +228,22 @@ python find_max_layers.py \
     --trial_steps 20 --trial_timeout 300
 ```
 
-**Step 1: AutoEP + ZeRO-2**
+**Step 1: Generate shared initialization artifact**
+
+```bash
+python train_compare.py \
+    --mode autoep \
+    --deepspeed_config configs/ds_autoep_zero2.json \
+    --num_layers 12 \
+    --seq_len 128 \
+    --micro_batch_size 2 \
+    --grad_accum 1 \
+    --seed 42 \
+    --init_weights_only \
+    --save_init_weights /mnt/local_storage/autoep_same_init_verified_20260209_004525/init_weights.safetensors
+```
+
+**Step 2: AutoEP + ZeRO-2**
 
 ```bash
 deepspeed --num_gpus 8 --master_port 29600 train_compare.py \
@@ -203,11 +256,12 @@ deepspeed --num_gpus 8 --master_port 29600 train_compare.py \
     --micro_batch_size 2 \
     --grad_accum 1 \
     --seed 42 \
+    --load_init_weights /mnt/local_storage/autoep_same_init_verified_20260209_004525/init_weights.safetensors \
     --metrics_out metrics_autoep.csv \
     --run_metadata_out metadata_autoep.json
 ```
 
-**Step 2: HF + ZeRO-3 leaf baseline**
+**Step 3: HF + ZeRO-3 leaf baseline**
 
 ```bash
 deepspeed --num_gpus 8 --master_port 29600 train_compare.py \
@@ -220,11 +274,12 @@ deepspeed --num_gpus 8 --master_port 29600 train_compare.py \
     --micro_batch_size 2 \
     --grad_accum 1 \
     --seed 42 \
+    --load_init_weights /mnt/local_storage/autoep_same_init_verified_20260209_004525/init_weights.safetensors \
     --metrics_out metrics_zero3_leaf.csv \
     --run_metadata_out metadata_zero3_leaf.json
 ```
 
-**Step 3: Generate comparison plots and summary**
+**Step 4: Generate comparison plots and summary**
 
 ```bash
 python compare_metrics.py \
@@ -234,7 +289,8 @@ python compare_metrics.py \
     --zero3_leaf_metadata metadata_zero3_leaf.json \
     --out_dir results/ \
     --out_json results/summary.json \
-    --warmup_steps 50
+    --warmup_steps 50 \
+    --require_same_init_hash
 ```
 
 ### Observed Results
@@ -243,23 +299,24 @@ python compare_metrics.py \
 
 | Metric | AutoEP + ZeRO-2 | HF + ZeRO-3 leaf |
 |--------|-----------------|-------------------|
-| Final loss (step 999) | 10.374 | 10.374 |
-| Peak GPU memory | 49.41 GB | 75.36 GB |
-| Avg throughput (post-warmup) | 9,054 tok/s | 2,138 tok/s |
+| Final loss (step 999) | 10.375 | 10.373 |
+| Peak GPU memory | 49.29 GB | 77.30 GB |
+| Avg throughput (post-warmup) | 8,820 tok/s | 1,737 tok/s |
 
 | Comparison Metric | Value |
 |-------------------|-------|
-| Mean abs loss diff | 0.131 |
-| Max abs loss diff | 5.584 |
-| Pearson correlation | 0.93 |
-| Memory ratio (autoep/zero3) | 0.66x |
-| Throughput ratio (autoep/zero3) | 4.23x |
+| Mean abs loss diff | 0.140 |
+| Max abs loss diff | 4.038 |
+| Pearson correlation | 0.95 |
+| Memory ratio (autoep/zero3) | 0.64x |
+| Throughput ratio (autoep/zero3) | 5.08x |
+| Same init hash | true |
 
 **Key takeaways:**
 
-- **Both modes converge to the same final loss** (~10.374) with strong correlation (Pearson 0.93). The loss curves show clear convergence from ~12.7 down to ~10.4 over 1000 steps with cosine LR decay (lr=3e-3, 100-step warmup). The high max abs diff (5.58) is from early transient spikes during warmup, not from steady-state divergence.
-- **AutoEP uses 34% less peak memory** due to 4-way expert partitioning (`autoep_size=4`), confirmed by validation: `local=4.23B params, global_est=16.91B, partition_ratio=4.0`.
-- **AutoEP is 4.2x faster** — at full Mixtral dimensions, ZeRO-3 parameter communication dominates. AutoEP+ZeRO-2 only communicates expert parameters via AllToAll (72 calls per step for 12 MoE layers), while ZeRO-3 gathers/scatters all 70+ GB of parameters every step.
+- **Both modes converge to the same final loss** (~10.37) with strong correlation (Pearson 0.95) when loading identical initialization weights.
+- **AutoEP uses about 36% less peak memory** due to 4-way expert partitioning (`autoep_size=4`), confirmed by validation: `local=4.23B params, global_est=16.91B, partition_ratio=4.0`.
+- **AutoEP is about 5.1x faster** on this stack-level comparison; ZeRO-3 parameter gather/scatter overhead dominates at full Mixtral dimensions.
 - Both modes used identical effective batch size: `128 seq_len * 2 mbs * 1 grad_accum * 8 dp_world_size = 2048 tokens/update`.
 
 **Note:** These are characterizations of the full runtime stacks (AutoEP+ZeRO-2 vs HF+ZeRO-3), not isolated AutoEP-only benchmarks. Memory and throughput differences include ZeRO-stage effects.
