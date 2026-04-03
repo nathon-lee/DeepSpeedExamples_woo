@@ -31,7 +31,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--allow_untested_versions", action="store_true")
     parser.add_argument("--target_global_tokens_per_update", type=int, default=None)
     parser.add_argument(
-        "--autoep_config", type=str, default="configs/ds_autoep_zero2.json"
+        "--autoep_config", type=str, default="configs/ds_autoep_zero1.json"
     )
     parser.add_argument(
         "--zero3_leaf_config", type=str, default="configs/ds_zero3_leaf.json"

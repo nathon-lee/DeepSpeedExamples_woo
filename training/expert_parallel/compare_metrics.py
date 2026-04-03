@@ -27,6 +27,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--zero3_leaf_metadata", type=str, required=True)
     parser.add_argument("--out_dir", type=str, required=True)
     parser.add_argument("--out_json", type=str, required=True)
+    parser.add_argument(
+        "--autoep_label", type=str, default="AutoEP + ZeRO-1"
+    )
+    parser.add_argument(
+        "--zero3_leaf_label", type=str, default="HF + ZeRO-3 leaf"
+    )
     parser.add_argument("--warmup_steps", type=int, default=5)
     parser.add_argument("--max_mean_abs_diff", type=float, default=None)
     parser.add_argument("--min_post_warmup_steps", type=int, default=10)
@@ -156,6 +162,8 @@ def try_plot(
     autoep_rows: list[dict],
     zero3_rows: list[dict],
     out_dir: str,
+    autoep_label: str,
+    zero3_leaf_label: str,
 ) -> dict[str, str | None]:
     """Generate comparison plots. Returns dict of plot paths or None."""
     plots = {"loss_curve": None, "peak_memory_bar": None, "throughput_bar": None}
@@ -179,8 +187,8 @@ def try_plot(
         z_loss = [float(r["loss_ce"]) for r in zero3_rows]
 
         fig, ax = plt.subplots(figsize=(10, 6))
-        ax.plot(a_steps, a_loss, label="AutoEP + ZeRO-2", marker="o", markersize=3)
-        ax.plot(z_steps, z_loss, label="HF + ZeRO-3 leaf", marker="s", markersize=3)
+        ax.plot(a_steps, a_loss, label=autoep_label, marker="o", markersize=3)
+        ax.plot(z_steps, z_loss, label=zero3_leaf_label, marker="s", markersize=3)
         ax.set_xlabel("Optimizer Step")
         ax.set_ylabel("CE Loss")
         ax.set_title("Loss Curve Comparison")
@@ -200,7 +208,7 @@ def try_plot(
 
         fig, ax = plt.subplots(figsize=(8, 5))
         bars = ax.bar(
-            ["AutoEP + ZeRO-2", "HF + ZeRO-3 leaf"],
+            [autoep_label, zero3_leaf_label],
             [a_peak / 1e9, z_peak / 1e9],
             color=["#2196F3", "#FF9800"],
         )
@@ -231,7 +239,7 @@ def try_plot(
 
         fig, ax = plt.subplots(figsize=(8, 5))
         bars = ax.bar(
-            ["AutoEP + ZeRO-2", "HF + ZeRO-3 leaf"],
+            [autoep_label, zero3_leaf_label],
             [a_avg, z_avg],
             color=["#2196F3", "#FF9800"],
         )
@@ -354,7 +362,13 @@ def main():
     tps_ratio = a_avg_tps / z_avg_tps if z_avg_tps > 0 else float("nan")
 
     # Generate plots
-    plots = try_plot(autoep_rows, zero3_rows, args.out_dir)
+    plots = try_plot(
+        autoep_rows,
+        zero3_rows,
+        args.out_dir,
+        autoep_label=args.autoep_label,
+        zero3_leaf_label=args.zero3_leaf_label,
+    )
 
     # Build summary
     summary = {
@@ -389,8 +403,8 @@ def main():
             "ratio": tps_ratio,
         },
         "caveats": [
-            "Throughput/memory comparisons include ZeRO-stage differences "
-            "(AutoEP+ZeRO-2 vs HF+ZeRO-3) and are not an isolated AutoEP-only benchmark.",
+            "Throughput and memory comparisons include differing ZeRO stages "
+            "and are not an isolated AutoEP-only benchmark.",
             "Loss comparison uses trend agreement, not bit-identical values. "
             "Small divergence is expected from different ZeRO stages and FP reduction order.",
         ],

@@ -1,10 +1,10 @@
 """AutoEP vs ZeRO-3 leaf training comparison script.
 
-Runs a randomly-initialized Mixtral MoE model in either AutoEP+ZeRO-2 mode
+Runs a randomly-initialized Mixtral MoE model in either AutoEP+ZeRO-1 mode
 or HF-native+ZeRO-3 leaf-module mode, collecting per-step metrics for comparison.
 
 Launch via deepspeed launcher:
-    deepspeed --num_gpus 8 train_compare.py --mode autoep --deepspeed_config configs/ds_autoep_zero2.json
+    deepspeed --num_gpus 8 train_compare.py --mode autoep --deepspeed_config configs/ds_autoep_zero1.json
     deepspeed --num_gpus 8 train_compare.py --mode zero3_leaf --deepspeed_config configs/ds_zero3_leaf.json
 """
 
@@ -479,6 +479,7 @@ def main():
         args,
         engine,
         val_result,
+        resolved_autoep_size=autoep_size if args.mode == "autoep" else None,
         init_weights_context=init_weights_context,
     )
 

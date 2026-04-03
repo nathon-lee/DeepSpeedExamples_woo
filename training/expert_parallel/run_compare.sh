@@ -220,7 +220,7 @@ m['stages'].append({
 
 conda run -n ds python train_compare.py \
     --mode autoep \
-    --deepspeed_config configs/ds_autoep_zero2.json \
+    --deepspeed_config configs/ds_autoep_zero1.json \
     --num_layers "$L_FINAL" \
     --seq_len "$SEQ_LEN" \
     --micro_batch_size "$MICRO_BATCH_SIZE" \
@@ -265,7 +265,7 @@ AUTOEP_PORT=$((MASTER_PORT + 100))
 conda run -n ds deepspeed --num_gpus "$NUM_GPUS" --master_port "$AUTOEP_PORT" \
     train_compare.py \
     --mode autoep \
-    --deepspeed_config configs/ds_autoep_zero2.json \
+    --deepspeed_config configs/ds_autoep_zero1.json \
     --steps "$STEPS" \
     --warmup_steps "$WARMUP_STEPS" \
     --num_layers "$L_FINAL" \
@@ -342,6 +342,8 @@ conda run -n ds python compare_metrics.py \
     --zero3_leaf_metadata "$ZERO3_META" \
     --out_dir "$OUT_DIR" \
     --out_json "$SUMMARY_JSON" \
+    --autoep_label "AutoEP + ZeRO-1" \
+    --zero3_leaf_label "HF + ZeRO-3 leaf" \
     --warmup_steps "$WARMUP_STEPS" \
     --require_same_init_hash
 

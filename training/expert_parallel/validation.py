@@ -31,7 +31,7 @@ def validate_autoep_engine(
             "warnings": [],
             "errors": [
                 "Cannot import AutoEPMoELayer. "
-                "Ensure DeepSpeed is installed from the tohtana/add_autoep branch."
+                "Ensure DeepSpeed is installed from an AutoEP-enabled branch."
             ],
         }
 
@@ -217,6 +217,7 @@ def collect_run_metadata(
     args: Any,
     engine: Any,
     validation_result: dict[str, Any],
+    resolved_autoep_size: int | None = None,
     init_weights_context: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Collect runtime metadata for reproducibility."""
@@ -285,7 +286,7 @@ def collect_run_metadata(
         "driver_version": driver_version,
         "world_size": int(os.environ.get("WORLD_SIZE", 1)),
         "dp_world_size": dp_ws,
-        "autoep_size": getattr(args, "autoep_size", None),
+        "autoep_size": resolved_autoep_size,
         "num_gpus": torch.cuda.device_count(),
         "hostname": socket.gethostname(),
         "effective_tokens_per_update": effective_tokens,
