@@ -82,7 +82,7 @@ This will:
 
 - Save init artifacts under `/mnt/local_storage/` (not your home dir)
 - Keep the sidecar metadata file `init_weights_meta.json` next to the `.safetensors` file
-- The 12-layer validated run in this README produced an init artifact of about `66 GB`, so plan local storage accordingly
+- The 8-layer validated run in this README produced an init artifact of about `45 GB`, so plan local storage accordingly
 - After a comparison finishes, the artifact is safe to delete because the metadata and summary retain the SHA-256 provenance
 
 ## Model
@@ -201,13 +201,14 @@ Each run writes a metadata JSON file containing:
 
 `compare_metrics.py` enforces matching init hashes by default (`--require_same_init_hash`). For legacy metadata without init-hash fields, use `--no_require_same_init_hash`.
 
-## Verified Results (8xH100 80GB, 12-layer Mixtral, `lr=1e-4`)
+## Verified Results (8xH100 80GB, 8-layer Mixtral, `lr=1e-4`)
 
-The commands below reproduce the shared-init comparison validated in run `autoep_example_validate_20260403_060614` (April 3, 2026 UTC). Step 0 is optional; the rerun documented here directly validates the 12-layer configuration.
+The commands below reproduce the shared-init comparison validated in run `autoep_example_validate_20260403_070130` (April 3, 2026 UTC). This documented rerun fixes the workflow at 8 layers so it fits the available environment.
 
 ### Environment
 
 - 8x NVIDIA H100 80GB HBM3
+- Validation run uses 8 transformer layers to fit this environment
 - DeepSpeed runtime imported from `fix/fix-autoep-zero2-expert-grad-predivide` at `fae0276f4ff1ebd7c8a30a7d07068f3850e00df3`
 - DeepSpeed version string `0.18.10+71a0a36a`
 - PyTorch `2.9.1+cu128`
@@ -220,20 +221,7 @@ The commands below reproduce the shared-init comparison validated in run `autoep
 All commands run from `DeepSpeedExamples/training/expert_parallel/`.
 
 ```bash
-RUN_ROOT=/mnt/local_storage/autoep_example_validate_20260403_060614
-```
-
-**Step 0 (optional): find maximum feasible layer count**
-
-```bash
-python find_max_layers.py \
-    --autoep_config configs/ds_autoep_zero1.json \
-    --zero3_leaf_config configs/ds_zero3_leaf.json \
-    --output_json "$RUN_ROOT/layer_search.json" \
-    --log_dir "$RUN_ROOT/layer_search/" \
-    --num_gpus 8 --master_port 29600 \
-    --seq_len 128 --micro_batch_size 2 --grad_accum 1 \
-    --trial_steps 20 --trial_timeout 300
+RUN_ROOT=/mnt/local_storage/autoep_example_validate_20260403_070130
 ```
 
 **Step 1: generate shared initialization artifact**
@@ -242,7 +230,7 @@ python find_max_layers.py \
 python train_compare.py \
     --mode autoep \
     --deepspeed_config configs/ds_autoep_zero1.json \
-    --num_layers 12 \
+    --num_layers 8 \
     --seq_len 128 \
     --micro_batch_size 2 \
     --grad_accum 1 \
@@ -254,10 +242,10 @@ python train_compare.py \
 **Step 2: AutoEP + ZeRO-1**
 
 ```bash
-deepspeed --num_gpus 8 --master_port 29644 train_compare.py \
+deepspeed --num_gpus 8 --master_port 29744 train_compare.py \
     --mode autoep \
     --deepspeed_config configs/ds_autoep_zero1.json \
-    --num_layers 12 \
+    --num_layers 8 \
     --steps 1000 \
     --warmup_steps 50 \
     --seq_len 128 \
@@ -272,10 +260,10 @@ deepspeed --num_gpus 8 --master_port 29644 train_compare.py \
 **Step 3: HF + ZeRO-3 leaf baseline**
 
 ```bash
-deepspeed --num_gpus 8 --master_port 29645 train_compare.py \
+deepspeed --num_gpus 8 --master_port 29745 train_compare.py \
     --mode zero3_leaf \
     --deepspeed_config configs/ds_zero3_leaf.json \
-    --num_layers 12 \
+    --num_layers 8 \
     --steps 1000 \
     --warmup_steps 50 \
     --seq_len 128 \
@@ -319,26 +307,26 @@ python compare_metrics.py \
 
 | Metric | AutoEP + ZeRO-1 | HF + ZeRO-3 leaf |
 |--------|------------------|-------------------|
-| Final loss (step 999) | 10.415 | 10.418 |
-| Peak GPU memory | 55.32 GB | 75.36 GB |
-| Avg throughput (post-warmup) | 8,997 tok/s | 2,189 tok/s |
+| Final loss (step 999) | 10.405 | 11.058 |
+| Peak GPU memory | 37.53 GB | 52.04 GB |
+| Avg throughput (post-warmup) | 13,155 tok/s | 7,405 tok/s |
 
 | Comparison metric | Value |
 |-------------------|-------|
-| Final abs loss diff | 0.0031 |
-| Last 100-step mean abs loss diff | 0.0085 |
-| Mean abs loss diff (950 aligned steps) | 0.0222 |
-| Max abs loss diff | 0.1428 |
-| Pearson correlation | 0.9958 |
-| Memory ratio (autoep/zero3) | 0.73x |
-| Throughput ratio (autoep/zero3) | 4.11x |
+| Final abs loss diff | 0.6530 |
+| Last 100-step mean abs loss diff | 0.6860 |
+| Mean abs loss diff (950 aligned steps) | 0.3246 |
+| Max abs loss diff | 0.7435 |
+| Pearson correlation | 0.6001 |
+| Memory ratio (autoep/zero3) | 0.72x |
+| Throughput ratio (autoep/zero3) | 1.78x |
 | Same init hash | true |
 
 **Key takeaways:**
 
-- **Both modes track closely at `lr=1e-4`** when loading identical initialization weights: final-step loss differs by only `0.0031`, and the last-100-step mean absolute loss difference is `0.0085`.
-- **AutoEP uses about 26.6% less peak memory** with 4-way expert partitioning, confirmed by validation: `local=4.23B` expert params, `global_est=16.91B`, `partition_ratio=4.0`.
-- **AutoEP is about 4.1x faster** on this full-stack comparison; the stripped ZeRO-3 baseline remains dominated by parameter partition/gather overhead and frequent allocator cache flushes.
+- **Both modes completed from identical initialization weights, but the 8-layer fit-to-environment run diverges more at `lr=1e-4`**: final-step loss differs by `0.6530`, the last-100-step mean absolute loss difference is `0.6860`, and Pearson correlation is `0.6001`.
+- **AutoEP uses about 27.9% less peak memory** with 4-way expert partitioning, confirmed by validation: `local=2.82B` expert params, `global_est=11.27B`, `partition_ratio=4.0`.
+- **AutoEP is about 1.78x faster** in this smaller configuration: `13,155 tok/s` vs `7,405 tok/s`.
 - **Both modes used the same effective batch size**: `128 seq_len * 2 mbs * 1 grad_accum * 8 dp_world_size = 2048 tokens/update`.
 
 **Note:** These are characterizations of the full runtime stacks (AutoEP + ZeRO-1 vs HF + ZeRO-3 leaf), not isolated AutoEP-only benchmarks. Memory and throughput differences include ZeRO-stage effects.
