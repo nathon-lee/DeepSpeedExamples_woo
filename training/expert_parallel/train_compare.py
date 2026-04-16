@@ -19,7 +19,7 @@ import time
 
 import numpy as np
 import torch
-from transformers import AutoModelForCausalLM
+from transformers import AutoModelForCausalLM, AutoConfig
 
 import deepspeed
 
@@ -303,17 +303,81 @@ def main():
             "load_balance_coeff", None
         )
 
-    # Build model config
+    # # Build model config
+    # output_router_logits = args.include_router_aux_loss == "on"
+    # model_config = build_mixtral_config(
+    #     num_layers=args.num_layers,
+    #     output_router_logits=output_router_logits,
+    # )
+    # num_experts = model_config.num_local_experts  # HF "num_local_experts" = total experts per layer
+
+    # # Build model config
+    # output_router_logits = args.include_router_aux_loss == "on"
+    
+    # # --- 替换为 Qwen-MoE 配置 ---
+    # model_config = AutoConfig.from_pretrained("Qwen/Qwen1.5-MoE-A2.7B", trust_remote_code=True)
+    # # 仅缩小层数防止 OOM，绝对不要修改 hidden_size 等维度，否则会导致 HF 初始化报错
+    # model_config.num_hidden_layers = args.num_layers  
+    
+    # # Qwen MoE 的专家参数提取
+    # num_experts = model_config.num_experts
+
+    #  # --- 替换为 DeepSeek-V2 配置 ---
+    # model_config = AutoConfig.from_pretrained("deepseek-ai/DeepSeek-V2-Lite", trust_remote_code=True)
+    # # 仅缩小层数防止 OOM
+    # model_config.num_hidden_layers = args.num_layers  
+
+    # # === 在这里补上缺失的 output_router_logits 定义 ===
+    # output_router_logits = args.include_router_aux_loss == "on"
+
+    # # --- 强行修复 HF DeepSeek-V2 初始化 Bug ---
+    # if not hasattr(model_config, "head_dim"):
+    #     model_config.head_dim = getattr(model_config, "qk_head_dim", getattr(model_config, "v_head_dim", 128))
+    # if not hasattr(model_config, "mlp_bias"):
+    #     model_config.mlp_bias = False
+    # if not hasattr(model_config, "attention_bias"):
+    #     model_config.attention_bias = False
+    # # ----------------------------------------
+    
+    # # DeepSeek 的专家数量字段可能不同，通常是 n_routed_experts
+    # # 如果找不到 num_experts，可以尝试 n_routed_experts 或设个默认值打印
+    # num_experts = getattr(model_config, "n_routed_experts", getattr(model_config, "num_experts", "unknown"))
+
+    # output_router_logits = args.include_router_aux_loss == "on"
+
+    # model_config = AutoConfig.from_pretrained("deepseek-ai/DeepSeek-V3-Base", trust_remote_code=True)
+    # model_config.num_hidden_layers = args.num_layers  
+    
+    # # === HF DeepSeek 全家桶无脑强补丁 ===
+    # for attr, default_val in [
+    #     ("head_dim", 128),
+    #     ("qk_head_dim", 128),
+    #     ("v_head_dim", 128),
+    #     ("mlp_bias", False),
+    #     ("attention_bias", False),
+    #     ("routed_scaling_factor", 1.0)
+    # ]:
+    #     if not hasattr(model_config, attr):
+    #         setattr(model_config, attr, getattr(model_config, attr, default_val))
+    # # ===================================
+        
+    # num_experts = getattr(model_config, "n_routed_experts", getattr(model_config, "num_experts", "unknown"))
+
     output_router_logits = args.include_router_aux_loss == "on"
-    model_config = build_mixtral_config(
-        num_layers=args.num_layers,
-        output_router_logits=output_router_logits,
-    )
-    num_experts = model_config.num_local_experts  # HF "num_local_experts" = total experts per layer
+
+    # === 使用官方 LLaMA 4 MoE 模型 ===
+    # model_config = AutoConfig.from_pretrained("meta-llama/Llama-4-Scout-17B-16E-Instruct", trust_remote_code=True)
+    # === 使用社区提供的无权限要求、微型随机权重的 LLaMA-4 模型进行测试 ===
+    model_config = AutoConfig.from_pretrained("llamafactory/tiny-random-Llama-4", trust_remote_code=True)
+    
+    model_config.num_hidden_layers = args.num_layers  
+        
+    num_experts = getattr(model_config, "num_local_experts", getattr(model_config, "num_experts", "unknown"))
+
 
     if rank == 0:
         logger.info(f"Mode: {args.mode}")
-        logger.info(f"Model: Mixtral with {args.num_layers} layers, {num_experts} experts")
+        logger.info(f"Model: LLaMA-4 with {args.num_layers} layers, {num_experts} experts")
         logger.info(f"Seq len: {args.seq_len}, Micro batch: {args.micro_batch_size}")
         logger.info(f"Grad accum: {args.grad_accum}, Steps: {args.steps}")
 

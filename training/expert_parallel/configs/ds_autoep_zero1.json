@@ -5,8 +5,8 @@
     },
     "expert_parallel": {
         "enabled": true,
-        "autoep_size": 4,
-        "preset_model": "mixtral",
+        "autoep_size": 2,
+        "preset_model": "llama4",
         "load_balance_coeff": null
     },
     "optimizer": {
