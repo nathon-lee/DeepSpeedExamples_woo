@@ -1,12 +1,19 @@
 """Online policy distillation trainer (DeepSpeed-optional).
 
-The trainer consumes a JSONL of trajectories, extracts
-``DistillationSample`` records keyed off intervention events, fills a
-``ReplayBuffer``, and trains the student policy with a placeholder
-behavior-cloning + KL distillation loss.
+Two modes:
 
-DeepSpeed is used to initialize the student if available; otherwise we fall
-back to vanilla PyTorch so the example still runs on a single CPU.
+* **Offline (default):** consume a frozen JSONL of trajectories, extract
+  ``DistillationSample`` records keyed off intervention events, fill a
+  ``ReplayBuffer``, and train the student with CE + KL distillation loss.
+* **Rounds / online (``--rounds N > 0``):** alternate ``collect ->
+  extend replay buffer -> train K steps`` for ``N`` rounds, with the
+  collector using the *current* student snapshot. This is what makes the
+  "Online" in "Online Policy Distillation" defensible: the data
+  distribution shifts as the student improves and the budget gate fires
+  on whatever uncertainty the student currently has.
+
+DeepSpeed is used to initialize the student if available; otherwise we
+fall back to vanilla PyTorch so the example still runs on a single CPU.
 """
 from __future__ import annotations
 
@@ -14,7 +21,7 @@ import argparse
 import json
 import os
 import sys
-from typing import List
+from typing import List, Optional
 
 import torch
 import torch.nn.functional as F
@@ -24,11 +31,15 @@ APP_DIR = os.path.dirname(THIS_DIR)
 if APP_DIR not in sys.path:
     sys.path.insert(0, APP_DIR)
 
-from data.intervention_dataset import load_distillation_samples  # noqa: E402
+from data.intervention_dataset import (  # noqa: E402
+    iter_distillation_samples,
+    load_distillation_samples,
+)
 from data.replay_buffer import ReplayBuffer  # noqa: E402
 from data.schema import DistillationSample  # noqa: E402
 from envs.factory import make_env  # noqa: E402
 from models.policy_heads import MLPPolicy  # noqa: E402
+from training.collect_rollouts import collect  # noqa: E402
 
 try:
     import deepspeed  # type: ignore
@@ -69,49 +80,12 @@ def distill_loss(
     return loss
 
 
-def train(
-    rollouts_path: str,
-    ds_config: str,
-    batch_size: int,
-    num_steps: int,
-    capacity: int,
-    prioritized: bool,
-    seed: int,
-    output_dir: str,
-    num_actions: int,
-    obs_dim: int,
-    log_every: int = 50,
-    checkpoint_path: str = "",
-) -> None:
-    torch.manual_seed(seed)
+def _init_optimizer(student: torch.nn.Module, ds_config: str):
+    """Initialise either a DeepSpeed engine or a vanilla AdamW optimizer.
 
-    samples = load_distillation_samples(rollouts_path)
-    if not samples:
-        # For a B=0 baseline run there are legitimately no interventions to
-        # distil from. Don't error out -- just skip the loop and save the
-        # (randomly initialised) student so downstream eval has a checkpoint.
-        print(
-            f"[train] WARNING: no distillation samples in {rollouts_path}; "
-            "saving an untrained checkpoint for baseline comparison."
-        )
-        student = MLPPolicy(obs_dim=obs_dim, num_actions=num_actions)
-        _save_checkpoint(student, output_dir, checkpoint_path, history=[])
-        return
-
-    buffer = ReplayBuffer(
-        capacity=capacity, prioritized=prioritized, seed=seed
-    )
-    buffer.extend(samples)
-    print(f"[train] loaded {len(samples)} samples into replay buffer "
-          f"(capacity={capacity}, prioritized={prioritized})")
-
-    student = MLPPolicy(obs_dim=obs_dim, num_actions=num_actions)
-
-    engine = None
-    optimizer = None
+    Returns ``(engine_or_None, optimizer_or_None, device)``.
+    """
     if _HAS_DEEPSPEED and ds_config and os.path.isfile(ds_config):
-        # Minimal DeepSpeed init; works on CPU when no CUDA is available
-        # because zero stage 0 is selected in the default config.
         try:
             engine, optimizer, _, _ = deepspeed.initialize(  # type: ignore[attr-defined]
                 model=student,
@@ -119,24 +93,40 @@ def train(
                 config=ds_config,
             )
             print("[train] DeepSpeed engine initialized.")
-        except Exception as exc:  # pragma: no cover - environment dependent
+            return engine, optimizer, engine.device
+        except Exception as exc:  # pragma: no cover - env dependent
             print(f"[train] DeepSpeed init failed ({exc}); using vanilla PyTorch.")
-            engine = None
-            optimizer = torch.optim.AdamW(student.parameters(), lr=3e-4)
+    elif not _HAS_DEEPSPEED:
+        print("[train] DeepSpeed not available; using vanilla PyTorch.")
     else:
-        if not _HAS_DEEPSPEED:
-            print("[train] DeepSpeed not available; using vanilla PyTorch.")
-        else:
-            print(f"[train] DeepSpeed config not found at {ds_config}; "
-                  "using vanilla PyTorch.")
-        optimizer = torch.optim.AdamW(student.parameters(), lr=3e-4)
+        print(f"[train] DeepSpeed config not found at {ds_config}; "
+              "using vanilla PyTorch.")
+    optimizer = torch.optim.AdamW(student.parameters(), lr=3e-4)
+    return None, optimizer, next(student.parameters()).device
 
+
+def _train_steps(
+    student: torch.nn.Module,
+    engine,
+    optimizer,
+    device,
+    buffer: ReplayBuffer,
+    num_steps: int,
+    batch_size: int,
+    num_actions: int,
+    log_every: int,
+    history: list,
+    log_prefix: str = "train",
+    global_step_offset: int = 0,
+) -> int:
+    """Run ``num_steps`` of distillation updates on samples in ``buffer``.
+
+    Returns the new global step counter (offset + num_steps).
+    """
+    if len(buffer) == 0:
+        print(f"[{log_prefix}] buffer empty; skipping {num_steps} update steps.")
+        return global_step_offset
     student.train()
-    history = []
-    if engine is not None:
-        device = engine.device
-    else:
-        device = next(student.parameters()).device
     for step in range(1, num_steps + 1):
         batch = buffer.sample(batch_size)
         obs, tgt, teacher_logits, weights = _batch_tensors(batch, num_actions)
@@ -158,9 +148,172 @@ def train(
             loss.backward()
             optimizer.step()
 
-        if step % log_every == 0 or step == 1:
-            print(f"[train] step={step}/{num_steps} loss={float(loss.item()):.4f}")
-            history.append({"step": step, "loss": float(loss.item())})
+        g_step = global_step_offset + step
+        if g_step % log_every == 0 or step == 1:
+            has_kl = teacher_logits is not None
+            print(
+                f"[{log_prefix}] step={g_step} loss={float(loss.item()):.4f}"
+                f" kl={'on' if has_kl else 'off'}"
+            )
+            history.append({"step": g_step, "loss": float(loss.item())})
+    return global_step_offset + num_steps
+
+
+def train(
+    rollouts_path: str,
+    ds_config: str,
+    batch_size: int,
+    num_steps: int,
+    capacity: int,
+    prioritized: bool,
+    seed: int,
+    output_dir: str,
+    num_actions: int,
+    obs_dim: int,
+    log_every: int = 50,
+    checkpoint_path: str = "",
+) -> None:
+    """Offline path: load JSONL once, train ``num_steps`` updates."""
+    torch.manual_seed(seed)
+
+    samples = load_distillation_samples(rollouts_path)
+    if not samples:
+        # For a B=0 baseline run there are legitimately no interventions to
+        # distil from. Don't error out -- just skip the loop and save the
+        # (randomly initialised) student so downstream eval has a checkpoint.
+        print(
+            f"[train] WARNING: no distillation samples in {rollouts_path}; "
+            "saving an untrained checkpoint for baseline comparison."
+        )
+        student = MLPPolicy(obs_dim=obs_dim, num_actions=num_actions)
+        _save_checkpoint(student, output_dir, checkpoint_path, history=[])
+        return
+
+    # Fail-fast sanity check: obs_dim derived from CLI/env must match the
+    # observation length actually stored in the rollouts file.
+    actual_obs_dim = len(samples[0].observation)
+    if actual_obs_dim != obs_dim:
+        raise ValueError(
+            f"[train] obs_dim mismatch: env says {obs_dim} but rollouts file "
+            f"{rollouts_path} has observations of length {actual_obs_dim}. "
+            "Did you change --env / --num-actions / --horizon between collect "
+            "and train?"
+        )
+
+    buffer = ReplayBuffer(
+        capacity=capacity, prioritized=prioritized, seed=seed
+    )
+    buffer.extend(samples)
+    print(f"[train] loaded {len(samples)} samples into replay buffer "
+          f"(capacity={capacity}, prioritized={prioritized})")
+
+    student = MLPPolicy(obs_dim=obs_dim, num_actions=num_actions)
+    engine, optimizer, device = _init_optimizer(student, ds_config)
+    history: list = []
+    _train_steps(
+        student=student, engine=engine, optimizer=optimizer, device=device,
+        buffer=buffer, num_steps=num_steps, batch_size=batch_size,
+        num_actions=num_actions, log_every=log_every, history=history,
+    )
+    _save_checkpoint(student, output_dir, checkpoint_path, history=history)
+
+
+def train_rounds(
+    rounds: int,
+    episodes_per_round: int,
+    num_steps_per_round: int,
+    env_name: str,
+    horizon: int,
+    num_actions: int,
+    episode_steps: Optional[int],
+    global_budget_per_round: int,
+    per_episode_budget: int,
+    threshold: float,
+    ds_config: str,
+    batch_size: int,
+    capacity: int,
+    prioritized: bool,
+    seed: int,
+    output_dir: str,
+    checkpoint_path: str,
+    log_every: int = 50,
+    seed_rollouts_path: str = "",
+) -> None:
+    """Streaming / online path: alternate collect -> extend -> train K steps."""
+    torch.manual_seed(seed)
+
+    # Build a probe env once to lock obs_dim / num_actions for the student.
+    env_kwargs = {}
+    if env_name == "v2" and episode_steps is not None:
+        env_kwargs["episode_steps"] = int(episode_steps)
+    probe_env = make_env(
+        env_name, num_actions=num_actions, horizon=horizon, seed=seed,
+        **env_kwargs,
+    )
+    obs_dim = probe_env.obs_dim
+
+    student = MLPPolicy(obs_dim=obs_dim, num_actions=num_actions)
+    engine, optimizer, device = _init_optimizer(student, ds_config)
+
+    buffer = ReplayBuffer(
+        capacity=capacity, prioritized=prioritized, seed=seed
+    )
+
+    # Optional warm-start: pre-populate the buffer from a previous offline run.
+    if seed_rollouts_path and os.path.isfile(seed_rollouts_path):
+        seed_samples = load_distillation_samples(seed_rollouts_path)
+        if seed_samples:
+            actual_obs_dim = len(seed_samples[0].observation)
+            if actual_obs_dim != obs_dim:
+                raise ValueError(
+                    f"[train-rounds] seed rollouts obs_dim {actual_obs_dim} "
+                    f"!= env obs_dim {obs_dim}; refusing to mix."
+                )
+            buffer.extend(seed_samples)
+            print(f"[train-rounds] seeded buffer with {len(seed_samples)} samples")
+
+    # Where to drop per-round artefacts.
+    art_dir = os.path.dirname(os.path.abspath(checkpoint_path)) if checkpoint_path \
+        else output_dir
+    os.makedirs(art_dir, exist_ok=True)
+
+    history: list = []
+    global_step = 0
+    for r in range(1, rounds + 1):
+        # Collect with the *current* student (in-memory; no checkpoint I/O).
+        rollouts_out = os.path.join(art_dir, f"_round_{r}_rollouts.jsonl")
+        trajs = collect(
+            num_episodes=episodes_per_round,
+            horizon=horizon,
+            num_actions=num_actions,
+            global_budget=global_budget_per_round,
+            per_episode_budget=per_episode_budget,
+            threshold=threshold,
+            seed=seed + r,
+            output_path=rollouts_out,
+            env_name=env_name,
+            episode_steps=episode_steps,
+            student=student,
+        )
+
+        new_samples: list = []
+        for t in trajs:
+            new_samples.extend(iter_distillation_samples(t))
+        buffer.extend(new_samples)
+        n_succ = sum(1 for t in trajs if t.success)
+        print(
+            f"[train-rounds] round={r}/{rounds} collected ep={len(trajs)} "
+            f"success={n_succ}/{len(trajs)} new_samples={len(new_samples)} "
+            f"buf={len(buffer)}"
+        )
+
+        global_step = _train_steps(
+            student=student, engine=engine, optimizer=optimizer, device=device,
+            buffer=buffer, num_steps=num_steps_per_round,
+            batch_size=batch_size, num_actions=num_actions,
+            log_every=log_every, history=history,
+            log_prefix=f"train-rounds.r{r}", global_step_offset=global_step,
+        )
 
     _save_checkpoint(student, output_dir, checkpoint_path, history=history)
 
@@ -209,6 +362,34 @@ def _parse_args() -> argparse.Namespace:
     p.add_argument("--horizon", type=int, default=32)
     p.add_argument("--num-actions", type=int, default=4)
     p.add_argument("--env", type=str, default="v1", choices=["v1", "v2"])
+    p.add_argument(
+        "--episode-steps", type=int, default=None,
+        help="V2 only: cap on episode length (used by rounds mode).",
+    )
+
+    # ---- Rounds / online mode -------------------------------------------
+    p.add_argument(
+        "--rounds", type=int, default=0,
+        help="If > 0, run streaming collect->extend->train for this many "
+             "rounds instead of the offline JSONL path.",
+    )
+    p.add_argument("--episodes-per-round", type=int, default=64)
+    p.add_argument(
+        "--num-steps-per-round", type=int, default=200,
+        help="Optimisation steps per round in rounds mode.",
+    )
+    p.add_argument(
+        "--global-budget-per-round", type=int, default=128,
+        help="Intervention budget *per round* (collector resets per round).",
+    )
+    p.add_argument("--per-episode-budget", type=int, default=4)
+    p.add_argument("--threshold", type=float, default=0.6)
+    p.add_argument(
+        "--seed-rollouts", type=str, default="",
+        help="Optional path to a previously collected JSONL used to "
+             "warm-start the replay buffer in rounds mode.",
+    )
+
     # Let DeepSpeed swallow its own flags when launched via `deepspeed`.
     p.add_argument("--local_rank", type=int, default=-1)
     return p.parse_args()
@@ -219,16 +400,41 @@ if __name__ == "__main__":
     probe_env = make_env(
         args.env, num_actions=args.num_actions, horizon=args.horizon
     )
-    train(
-        rollouts_path=args.rollouts,
-        ds_config=args.ds_config,
-        batch_size=args.batch_size,
-        num_steps=args.num_steps,
-        capacity=args.capacity,
-        prioritized=args.prioritized,
-        seed=args.seed,
-        output_dir=args.output_dir,
-        num_actions=probe_env.num_actions,
-        obs_dim=probe_env.obs_dim,
-        checkpoint_path=args.checkpoint_path,
-    )
+    if args.rounds > 0:
+        print(f"[train] rounds mode: rounds={args.rounds} "
+              f"episodes_per_round={args.episodes_per_round} "
+              f"steps_per_round={args.num_steps_per_round}")
+        train_rounds(
+            rounds=args.rounds,
+            episodes_per_round=args.episodes_per_round,
+            num_steps_per_round=args.num_steps_per_round,
+            env_name=args.env,
+            horizon=args.horizon,
+            num_actions=probe_env.num_actions,
+            episode_steps=args.episode_steps,
+            global_budget_per_round=args.global_budget_per_round,
+            per_episode_budget=args.per_episode_budget,
+            threshold=args.threshold,
+            ds_config=args.ds_config,
+            batch_size=args.batch_size,
+            capacity=args.capacity,
+            prioritized=args.prioritized,
+            seed=args.seed,
+            output_dir=args.output_dir,
+            checkpoint_path=args.checkpoint_path,
+            seed_rollouts_path=args.seed_rollouts,
+        )
+    else:
+        train(
+            rollouts_path=args.rollouts,
+            ds_config=args.ds_config,
+            batch_size=args.batch_size,
+            num_steps=args.num_steps,
+            capacity=args.capacity,
+            prioritized=args.prioritized,
+            seed=args.seed,
+            output_dir=args.output_dir,
+            num_actions=probe_env.num_actions,
+            obs_dim=probe_env.obs_dim,
+            checkpoint_path=args.checkpoint_path,
+        )

@@ -30,6 +30,7 @@ def evaluate(
     greedy: bool,
     env_name: str = "v1",
     episode_steps: int | None = None,
+    allow_random_init: bool = False,
 ) -> dict:
     torch.manual_seed(seed)
     env_kwargs: dict = {}
@@ -40,10 +41,30 @@ def evaluate(
         **env_kwargs,
     )
     student = MLPPolicy(obs_dim=env.obs_dim, num_actions=env.num_actions)
-    if checkpoint and os.path.isfile(checkpoint):
-        student.load_state_dict(torch.load(checkpoint, map_location="cpu"))
-        print(f"[eval_success] loaded {checkpoint}")
+    if checkpoint:
+        if not os.path.isfile(checkpoint):
+            if allow_random_init:
+                print(
+                    f"[eval_success] checkpoint not found at {checkpoint}; "
+                    "--allow-random-init is set, evaluating random init."
+                )
+            else:
+                raise FileNotFoundError(
+                    f"[eval_success] checkpoint not found: {checkpoint}. "
+                    "Pass --allow-random-init to evaluate an untrained policy on purpose."
+                )
+        else:
+            state = torch.load(checkpoint, map_location="cpu")
+            # strict=True surfaces shape mismatches instead of silently loading
+            # a stale checkpoint from a different env / num_actions / horizon.
+            student.load_state_dict(state, strict=True)
+            print(f"[eval_success] loaded {checkpoint}")
     else:
+        if not allow_random_init:
+            raise ValueError(
+                "[eval_success] --checkpoint is empty. "
+                "Pass --allow-random-init to evaluate an untrained policy on purpose."
+            )
         print("[eval_success] no checkpoint provided; evaluating random init.")
     student.eval()
 
@@ -91,6 +112,10 @@ def _parse_args() -> argparse.Namespace:
         "--episode-steps", type=int, default=None,
         help="V2 only: cap on episode length; defaults to --horizon.",
     )
+    p.add_argument(
+        "--allow-random-init", action="store_true",
+        help="Permit eval against a freshly-initialised student (no checkpoint loaded).",
+    )
     p.add_argument("--output", type=str, default="eval_success.json")
     return p.parse_args()
 
@@ -106,6 +131,7 @@ if __name__ == "__main__":
         greedy=args.greedy,
         env_name=args.env,
         episode_steps=args.episode_steps,
+        allow_random_init=args.allow_random_init,
     )
     with open(args.output, "w", encoding="utf-8") as f:
         json.dump(report, f, indent=2)

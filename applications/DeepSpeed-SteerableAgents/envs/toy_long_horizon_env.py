@@ -117,6 +117,13 @@ class ToyLongHorizonEnv(BaseEnv):
             self._resample_hidden()
         return self._obs(), reward, self._done, info
 
+    def get_probe_info(self) -> Dict[str, Any]:
+        return {
+            "oracle_action": int(self._good_action),
+            "trap_action": int(self._trap_action),
+            "progress": int(self._progress),
+        }
+
     def render(self) -> str:
         return (
             f"step={self._step}/{self.horizon} progress={self._progress} "

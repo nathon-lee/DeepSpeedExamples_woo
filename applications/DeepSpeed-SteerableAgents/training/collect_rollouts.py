@@ -52,6 +52,7 @@ def collect(
     checkpoint: str = "",
     env_name: str = "v1",
     episode_steps: Optional[int] = None,
+    student: Optional[MLPPolicy] = None,
 ) -> List[Trajectory]:
     torch.manual_seed(seed)
 
@@ -62,12 +63,15 @@ def collect(
         env_name, num_actions=num_actions, horizon=horizon, seed=seed,
         **env_kwargs,
     )
-    student = MLPPolicy(obs_dim=env.obs_dim, num_actions=env.num_actions)
-    if checkpoint and os.path.isfile(checkpoint):
-        student.load_state_dict(torch.load(checkpoint, map_location="cpu"))
+    if student is None:
+        student = MLPPolicy(obs_dim=env.obs_dim, num_actions=env.num_actions)
+        if checkpoint and os.path.isfile(checkpoint):
+            student.load_state_dict(
+                torch.load(checkpoint, map_location="cpu"), strict=True
+            )
     student.eval()
 
-    teacher = TeacherQueryPolicy()
+    teacher = TeacherQueryPolicy(num_actions=env.num_actions)
     budget = BudgetController(
         global_budget=global_budget,
         per_episode_budget=per_episode_budget,
@@ -94,18 +98,14 @@ def collect(
         # Peek at info for the *current* step by taking a dummy reset-style probe:
         # we just call env.step after deciding; teacher needs info BEFORE the act
         # is executed, so we use a one-step lookahead by reading internal hidden
-        # state via a soft API: env exposes oracle/trap in step()'s info AFTER the
-        # action. To still let the teacher veto traps, we ask the env for its
-        # currently-sampled oracle/trap via a non-public probe.
+        # state via the env's public probe API.
         while not done and step < max_steps:
             obs_t = torch.tensor(obs, dtype=torch.float32)
             action, logits, entropy = student.act(obs_t, greedy=False)
-            # Pre-step probe: peek at the env's hidden state for the teacher.
-            probe_info = {
-                "oracle_action": env._good_action,  # noqa: SLF001
-                "trap_action": env._trap_action,    # noqa: SLF001
-                "progress": env._progress,          # noqa: SLF001
-            }
+            # Pre-step probe: ask the env for whatever hidden state the
+            # teacher is allowed to see. The default BaseEnv impl returns
+            # ``{}``, so a real (non-toy) env can refuse to expose anything.
+            probe_info = env.get_probe_info()
 
             executed_action = action
             iv: InterventionEvent | None = None

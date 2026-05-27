@@ -26,6 +26,17 @@ class BaseEnv(ABC):
         the simulated teacher.
         """
 
+    def get_probe_info(self) -> Dict[str, Any]:
+        """Return any *pre-step* hidden state the teacher is allowed to peek at.
+
+        Concrete envs may expose oracle/trap/progress information here so the
+        collector does not have to reach into private attributes. The default
+        implementation returns an empty dict, which forces the teacher to fall
+        back to its uncertainty-only behaviour.
+        """
+        return {}
+
     @abstractmethod
     def render(self) -> str:
         """Return a short string representation (debug only)."""
+

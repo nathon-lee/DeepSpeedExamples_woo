@@ -1,22 +1,52 @@
 """Teacher query policy.
 
 For the MVP, the 'teacher' is a deterministic oracle over the toy env. Given
-the env ``info`` dict (which exposes ``oracle_action`` and ``trap_action``),
-the teacher decides which ``InterventionEvent`` to emit. A real
-implementation would call a stronger model or a human-in-the-loop service.
+the env probe info (``oracle_action``/``trap_action``/``progress``), the
+teacher decides which ``InterventionEvent`` to emit. A real implementation
+would call a stronger model or a human-in-the-loop service.
+
+The teacher additionally attaches a *smoothed peaked* ``teacher_logits``
+vector to every action-bearing intervention payload so the distillation
+trainer can compute a real KL term between student and teacher
+distributions (not just behavior cloning on the argmax).
 """
 from __future__ import annotations
 
-from typing import Any, Dict, Optional
+from typing import Any, Dict, List, Optional
 
 from data.schema import InterventionEvent
+
+
+def _peaked_logits(
+    target_action: int, num_actions: int, peak: float = 2.0
+) -> List[float]:
+    """Build a smoothed-peaked logits vector centered on ``target_action``.
+
+    With ``peak=2.0`` and ``num_actions=4`` the softmax is
+    ``[0.94, 0.02, 0.02, 0.02]`` -- enough mass on the recommended action to
+    drive the KL term, but soft enough that the student is not forced to a
+    hard one-hot.
+    """
+    logits = [-peak] * int(num_actions)
+    if 0 <= int(target_action) < int(num_actions):
+        logits[int(target_action)] = peak
+    return logits
 
 
 class TeacherQueryPolicy:
     """Rule-based teacher that picks the most informative intervention kind."""
 
-    def __init__(self, teacher_id: str = "oracle") -> None:
+    def __init__(
+        self,
+        num_actions: int,
+        teacher_id: str = "oracle",
+        veto_peak: float = 3.0,
+        plan_peak: float = 2.0,
+    ) -> None:
+        self.num_actions = int(num_actions)
         self.teacher_id = teacher_id
+        self.veto_peak = float(veto_peak)
+        self.plan_peak = float(plan_peak)
 
     def query(
         self,
@@ -29,10 +59,11 @@ class TeacherQueryPolicy:
 
         Rules (in order):
           - If the proposed action is the trap, **veto** it and provide the
-            oracle replacement action.
+            oracle replacement action (sharply peaked logits).
           - Else if uncertainty is high, give a **plan_correction** with the
-            oracle action as the first action.
-          - Else periodically emit a **progress_update**.
+            oracle action and a moderately peaked logits vector.
+          - Else periodically emit a **progress_update** (no logits, no
+            action override -- used only as a steerability signal).
         """
         oracle_action = info.get("oracle_action")
         trap_action = info.get("trap_action")
@@ -50,6 +81,9 @@ class TeacherQueryPolicy:
                     "replacement_action": int(oracle_action),
                     "reason": "trap_action",
                     "quality": 2.0,
+                    "teacher_logits": _peaked_logits(
+                        int(oracle_action), self.num_actions, self.veto_peak
+                    ),
                 },
                 cost=1.0,
                 teacher_id=self.teacher_id,
@@ -63,6 +97,9 @@ class TeacherQueryPolicy:
                     "first_action": int(oracle_action),
                     "target_action": int(oracle_action),
                     "quality": 1.5,
+                    "teacher_logits": _peaked_logits(
+                        int(oracle_action), self.num_actions, self.plan_peak
+                    ),
                 },
                 cost=1.0,
                 teacher_id=self.teacher_id,
@@ -85,6 +122,9 @@ class TeacherQueryPolicy:
                 "first_action": int(oracle_action),
                 "target_action": int(oracle_action),
                 "quality": 1.0,
+                "teacher_logits": _peaked_logits(
+                    int(oracle_action), self.num_actions, self.plan_peak
+                ),
             },
             cost=1.0,
             teacher_id=self.teacher_id,

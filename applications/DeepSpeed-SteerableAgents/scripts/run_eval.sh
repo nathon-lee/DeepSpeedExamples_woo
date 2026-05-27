@@ -19,6 +19,7 @@ python "$APP_DIR/eval/eval_success.py" \
     --seed "${EVAL_SEED:-1234}" \
     --env "${ENV:-v1}" \
     ${EPISODE_STEPS:+--episode-steps "$EPISODE_STEPS"} \
+    ${ALLOW_RANDOM_INIT:+--allow-random-init} \
     --output "${PREFIX}eval_success.json"
 
 python "$APP_DIR/eval/eval_budget.py" \
