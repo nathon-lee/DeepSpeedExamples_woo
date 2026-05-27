@@ -23,25 +23,31 @@ over budgets.
 Example
 -------
 
+Run the collect → train → eval pipeline once per budget, then aggregate:
+
 ```bash
-# Produce reports for a sweep of budgets B in {0,2,4,8,16}.
+mkdir -p sweep && cd sweep
+NUM_EPISODES=512
 for B in 0 2 4 8 16; do
-    GLOBAL_BUDGET=$B PER_EP_BUDGET=$B THRESHOLD=0 ENV=v2 \
-        EPISODE_STEPS=24 HORIZON=8 \
-        OUTPUT=rollouts_b${B}.jsonl bash scripts/run_collect.sh
-    ENV=v2 HORIZON=8 EPISODE_STEPS=24 \
-        ROLLOUTS=rollouts_b${B}.jsonl \
-        bash scripts/run_eval.sh
-    mv eval_success.json sweep_b${B}_success.json
-    mv eval_budget.json  sweep_b${B}_budget.json
+    GLOBAL_BUDGET=$((B*NUM_EPISODES)) PER_EP_BUDGET=$B THRESHOLD=0 \
+        ENV=v2 HORIZON=8 EPISODE_STEPS=24 NUM_EPISODES=$NUM_EPISODES \
+        OUTPUT=roll_b${B}.jsonl bash ../scripts/run_collect.sh
+
+    ENV=v2 HORIZON=8 EPISODE_STEPS=24 NUM_STEPS=2000 BATCH_SIZE=128 \
+        ROLLOUTS=roll_b${B}.jsonl \
+        CHECKPOINT=ckpt_b${B}.pt bash ../scripts/run_train.sh
+
+    ENV=v2 HORIZON=8 EPISODE_STEPS=24 NUM_EVAL_EPISODES=256 \
+        CHECKPOINT=ckpt_b${B}.pt ROLLOUTS=roll_b${B}.jsonl \
+        EVAL_PREFIX=b${B}_ bash ../scripts/run_eval.sh
 done
 
-python eval/eval_uplift.py \\
-    --baseline sweep_b0_success.json \\
-    --run b2:sweep_b2_success.json:sweep_b2_budget.json \\
-    --run b4:sweep_b4_success.json:sweep_b4_budget.json \\
-    --run b8:sweep_b8_success.json:sweep_b8_budget.json \\
-    --run b16:sweep_b16_success.json:sweep_b16_budget.json \\
+python ../eval/eval_uplift.py \\
+    --baseline b0_eval_success.json \\
+    --run b2:b2_eval_success.json:b2_eval_budget.json \\
+    --run b4:b4_eval_success.json:b4_eval_budget.json \\
+    --run b8:b8_eval_success.json:b8_eval_budget.json \\
+    --run b16:b16_eval_success.json:b16_eval_budget.json \\
     --output uplift.json
 ```
 """
