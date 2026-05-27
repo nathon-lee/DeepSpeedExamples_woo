@@ -67,7 +67,7 @@ def distill_loss(
     target_actions: torch.Tensor,
     teacher_logits: torch.Tensor | None,
     weights: torch.Tensor,
-    kl_coeff: float = 0.5,
+    kl_coeff: float = 0.0,
 ) -> torch.Tensor:
     """Behavior-cloning CE + optional KL to teacher distribution."""
     ce = F.cross_entropy(student_logits, target_actions, reduction="none")
@@ -118,7 +118,7 @@ def _train_steps(
     history: list,
     log_prefix: str = "train",
     global_step_offset: int = 0,
-    kl_coeff: float = 0.5,
+    kl_coeff: float = 0.0,
 ) -> int:
     """Run ``num_steps`` of distillation updates on samples in ``buffer``.
 
@@ -177,7 +177,7 @@ def train(
     obs_dim: int,
     log_every: int = 50,
     checkpoint_path: str = "",
-    kl_coeff: float = 0.5,
+    kl_coeff: float = 0.0,
 ) -> None:
     """Offline path: load JSONL once, train ``num_steps`` updates."""
     torch.manual_seed(seed)
@@ -245,7 +245,7 @@ def train_rounds(
     checkpoint_path: str,
     log_every: int = 50,
     seed_rollouts_path: str = "",
-    kl_coeff: float = 0.5,
+    kl_coeff: float = 0.0,
 ) -> None:
     """Streaming / online path: alternate collect -> extend -> train K steps."""
     torch.manual_seed(seed)
@@ -399,9 +399,13 @@ def _parse_args() -> argparse.Namespace:
              "warm-start the replay buffer in rounds mode.",
     )
     p.add_argument(
-        "--kl-coeff", type=float, default=0.5,
-        help="Weight on the KL-to-teacher term. Set to 0 for a BC-only "
-             "ablation (the loss collapses to weighted cross-entropy).",
+        "--kl-coeff", type=float, default=0.0,
+        help="Weight on the KL-to-teacher term. Default 0.0 (BC-only). "
+             "Set >0 (e.g. 0.5) to enable KL distillation; in our toy v2 "
+             "experiments with peaked teacher logits, kl_coeff=0 beats "
+             "kl_coeff=0.5 by ~2.6pp (p<0.001 across 5 seeds), so KL is "
+             "off by default. Re-enable on environments where the teacher "
+             "produces a softer / more informative distribution.",
     )
 
     # Let DeepSpeed swallow its own flags when launched via `deepspeed`.

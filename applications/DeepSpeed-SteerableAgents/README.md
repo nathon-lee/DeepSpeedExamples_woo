@@ -400,8 +400,61 @@ python experiments/aggregate_results.py results/ \
     --csv results/all.csv --markdown results/all.md
 ```
 
-Walks `results/` recursively, skips malformed files with a warning, and
-emits a single flat table covering every experiment / seed.
+Walks `results/` recursively, skips malformed files with a warning,
+dedups any double-counted rows by `(experiment, run_id)`, and emits a
+single flat table covering every experiment / seed.
+
+For a seed-folded view (one row per configuration with mean ± std),
+pass `--group-by`:
+
+```bash
+python experiments/aggregate_results.py results/ \
+    --group-by experiment,mode,budget,kl_coeff \
+    --group-metrics success_rate,mean_interventions_per_traj \
+    --markdown results/all_grouped.md
+```
+
+### Reference numbers (toy v2, 5 seeds, 256 eval episodes each)
+
+These are the headline results from our own runs; they are useful as
+sanity checks when re-running on a different machine.
+
+**Budget sweep** (`--kl-coeff 0.5`, B varied):
+
+| B  | Success rate | Cost / uplift point |
+|----|--------------|---------------------|
+| 0  | 0.4 % ± 0.4 %  | — (baseline)        |
+| 1  | 94.4 % ± 2.2 % | **0.0107** (best)   |
+| 2  | **97.9 % ± 1.2 %** (peak) | 0.0205   |
+| 3  | 97.2 % ± 0.8 % | 0.0310              |
+| 4  | 96.8 % ± 0.3 % | 0.0415              |
+| 8  | 95.9 % ± 1.6 % | 0.0838 (worst)      |
+
+Performance plateaus across B = 2 – 4 and then **regresses at B = 8**
+(p ≈ 0.05 vs B = 2), so "more interventions" is not free.
+
+**Distillation ablation** (B = 4):
+
+| Variant            | Success rate    |
+|--------------------|-----------------|
+| BC-only (kl = 0.0) | **99.4 % ± 0.7 %** |
+| BC + KL (kl = 0.5) | 96.8 % ± 0.3 %  |
+
+BC-only beats BC + KL by **2.6 pp** (t ≈ 7.3, p < 0.001). On peaked
+teacher logits the KL term hurts; this is why `--kl-coeff` defaults to
+`0.0`. Set `--kl-coeff 0.5` (or anything > 0) on environments where the
+teacher emits a softer distribution.
+
+**Offline vs rounds** (B = 4, kl = 0.0, total train steps = 2000):
+
+| Mode                          | Success rate    |
+|-------------------------------|-----------------|
+| Offline                       | 99.4 % ± 0.7 %  |
+| Rounds (10 × 200)             | 99.0 % ± 0.9 %  |
+
+Statistically indistinguishable (Δ = 0.4 pp, p ≈ 0.47). The rounds
+schedule pays no performance tax for the ability to absorb fresh
+trajectories.
 
 ---
 
