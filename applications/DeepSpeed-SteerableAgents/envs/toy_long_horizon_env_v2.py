@@ -42,11 +42,21 @@ class ToyLongHorizonEnvV2(BaseEnv):
         seed: Optional[int] = None,
         reveal_good: bool = True,
         reveal_trap: bool = True,
+        episode_steps: Optional[int] = None,
+        progress_goal: Optional[int] = None,
     ) -> None:
         self.num_actions = int(num_actions)
         self.horizon = int(horizon)
         self.reveal_good = bool(reveal_good)
         self.reveal_trap = bool(reveal_trap)
+        # `horizon` is the *progress* horizon (target). `episode_steps` is the
+        # actual max number of steps the agent is allowed to take. Defaults
+        # make them equal (strict all-or-nothing). Setting episode_steps >
+        # horizon turns the task into a "budget-of-time" version, where some
+        # wasted steps are tolerated -- this is what produces smooth
+        # budget-vs-success curves for steering experiments.
+        self.progress_goal = int(progress_goal if progress_goal is not None else self.horizon)
+        self.episode_steps = int(episode_steps if episode_steps is not None else self.horizon)
         # obs = step + progress + one_hot(last) + optional one_hot(good)/one_hot(trap)
         self.obs_dim = (
             2
@@ -70,8 +80,8 @@ class ToyLongHorizonEnvV2(BaseEnv):
 
     def _obs(self) -> List[float]:
         obs = [
-            self._step / max(1, self.horizon),
-            self._progress / max(1, self.horizon),
+            self._step / max(1, self.episode_steps),
+            self._progress / max(1, self.progress_goal),
         ]
         last_oh = [0.0] * self.num_actions
         if 0 <= self._last_action < self.num_actions:
@@ -115,11 +125,11 @@ class ToyLongHorizonEnvV2(BaseEnv):
         self._step += 1
         self._last_action = action
 
-        success = self._progress >= self.horizon
+        success = self._progress >= self.progress_goal
         if success:
             self._done = True
             reward += 5.0
-        elif self._step >= self.horizon:
+        elif self._step >= self.episode_steps:
             self._done = True  # ran out of time
 
         info = {

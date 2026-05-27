@@ -29,9 +29,16 @@ def evaluate(
     seed: int,
     greedy: bool,
     env_name: str = "v1",
+    episode_steps: int | None = None,
 ) -> dict:
     torch.manual_seed(seed)
-    env = make_env(env_name, num_actions=num_actions, horizon=horizon, seed=seed)
+    env_kwargs: dict = {}
+    if env_name == "v2" and episode_steps is not None:
+        env_kwargs["episode_steps"] = int(episode_steps)
+    env = make_env(
+        env_name, num_actions=num_actions, horizon=horizon, seed=seed,
+        **env_kwargs,
+    )
     student = MLPPolicy(obs_dim=env.obs_dim, num_actions=env.num_actions)
     if checkpoint and os.path.isfile(checkpoint):
         student.load_state_dict(torch.load(checkpoint, map_location="cpu"))
@@ -43,12 +50,13 @@ def evaluate(
     successes = 0
     rewards = []
     lengths = []
+    max_steps = getattr(env, "episode_steps", horizon)
     for _ in range(num_episodes):
         obs = env.reset()
         done = False
         total_r = 0.0
         steps = 0
-        while not done and steps < horizon:
+        while not done and steps < max_steps:
             obs_t = torch.tensor(obs, dtype=torch.float32)
             action, _, _ = student.act(obs_t, greedy=greedy)
             obs, reward, done, info = env.step(action)
@@ -79,6 +87,10 @@ def _parse_args() -> argparse.Namespace:
     p.add_argument("--seed", type=int, default=1234)
     p.add_argument("--greedy", action="store_true")
     p.add_argument("--env", type=str, default="v1", choices=["v1", "v2"])
+    p.add_argument(
+        "--episode-steps", type=int, default=None,
+        help="V2 only: cap on episode length; defaults to --horizon.",
+    )
     p.add_argument("--output", type=str, default="eval_success.json")
     return p.parse_args()
 
@@ -93,6 +105,7 @@ if __name__ == "__main__":
         seed=args.seed,
         greedy=args.greedy,
         env_name=args.env,
+        episode_steps=args.episode_steps,
     )
     with open(args.output, "w", encoding="utf-8") as f:
         json.dump(report, f, indent=2)

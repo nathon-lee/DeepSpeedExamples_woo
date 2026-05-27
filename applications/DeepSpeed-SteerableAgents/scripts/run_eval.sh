@@ -14,6 +14,7 @@ python eval/eval_success.py \
     --num-actions "${NUM_ACTIONS:-4}" \
     --seed "${EVAL_SEED:-1234}" \
     --env "${ENV:-v1}" \
+    ${EPISODE_STEPS:+--episode-steps "$EPISODE_STEPS"} \
     --output eval_success.json
 
 python eval/eval_budget.py --rollouts "$ROLLOUTS" --output eval_budget.json

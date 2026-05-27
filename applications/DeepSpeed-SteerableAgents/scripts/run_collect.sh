@@ -13,4 +13,5 @@ python training/collect_rollouts.py \
     --threshold "${THRESHOLD:-0.6}" \
     --seed "${SEED:-0}" \
     --env "${ENV:-v1}" \
+    ${EPISODE_STEPS:+--episode-steps "$EPISODE_STEPS"} \
     --output "${OUTPUT:-rollouts.jsonl}"
