@@ -334,6 +334,77 @@ for `run_eval.sh`) when you genuinely want a random-policy baseline.
 
 ---
 
+## Experiments
+
+The `experiments/` directory packages the three paper-facing experiment
+groups as one-command shell scripts. Each runner:
+
+1. Loops over the configurations of interest.
+2. Calls the existing `scripts/run_collect.sh` / `run_train.sh` /
+   `run_eval.sh` helpers (no new training code).
+3. Merges the three eval JSONs + run metadata into a single
+   `ResultRow` JSON via `experiments/result_schema.py`.
+4. Calls `experiments/aggregate_results.py` to emit a flat
+   `summary.csv` and `summary.md` for plotting / dropping into a paper.
+
+Result rows live under `results/<experiment>/<run_id>.json`; intermediate
+artefacts (rollouts JSONLs, per-budget checkpoints, raw eval reports)
+live under `runs/<experiment>/`. Both directories are caller-relative and
+created on demand. Override with `RESULTS_DIR` / `WORK_DIR`.
+
+### 1) Budget sweep
+
+```bash
+cd applications/DeepSpeed-SteerableAgents
+BUDGETS="0 1 2 4 8" SEED=0 bash experiments/exp_budget_sweep.sh
+# -> results/budget_sweep/B{0,1,2,4,8}_s0.json
+# -> results/budget_sweep/summary.{csv,md}
+```
+
+The first budget in the list is treated as the baseline; subsequent rows
+get `success_uplift_vs_baseline` and `cost_per_uplift_point` computed
+against it. Run multiple seeds by re-invoking with different `SEED=`
+values — rows are written side-by-side, the aggregator picks them all up.
+
+### 2) Distillation ablation (BC-only vs BC+KL)
+
+```bash
+B=4 SEED=0 bash experiments/exp_distill_ablation.sh
+# -> results/distill_ablation/{bc,bc_kl}_s0.json
+```
+
+Both arms share a single collection (same rollouts JSONL) and only
+differ in `--kl-coeff` (`0.0` vs `0.5`), so the eval delta is a clean
+attribution to the KL term.
+
+### 3) Offline vs rounds (online) training
+
+```bash
+B=4 SEED=0 \
+    NUM_STEPS=2000 ROUNDS=10 NUM_STEPS_PER_ROUND=200 \
+    EPISODES_PER_ROUND=64 \
+    bash experiments/exp_offline_vs_rounds.sh
+# -> results/offline_vs_rounds/{offline,rounds}_s0.json
+```
+
+Total optimisation budget is matched: `NUM_STEPS ==
+ROUNDS*NUM_STEPS_PER_ROUND`. The rounds arm re-collects a held-out
+evaluation rollouts file at the end so `eval_budget` /
+`eval_steerability` see trajectories produced by the *finished* student
+(not the noisy round-1 student).
+
+### Aggregating across runs
+
+```bash
+python experiments/aggregate_results.py results/ \
+    --csv results/all.csv --markdown results/all.md
+```
+
+Walks `results/` recursively, skips malformed files with a warning, and
+emits a single flat table covering every experiment / seed.
+
+---
+
 ## What's implemented vs. future work
 
 **Implemented (MVP):**
