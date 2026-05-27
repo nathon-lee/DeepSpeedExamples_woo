@@ -1,0 +1,3 @@
+# Core deps for the MVP. DeepSpeed is optional; trainer falls back to vanilla PyTorch.
+torch>=2.0
+deepspeed>=0.12 ; platform_system != "Windows"
