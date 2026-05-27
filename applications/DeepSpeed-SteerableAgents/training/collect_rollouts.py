@@ -70,6 +70,9 @@ def collect(
                 torch.load(checkpoint, map_location="cpu"), strict=True
             )
     student.eval()
+    # Match the obs tensors we build below to wherever the student lives
+    # (rounds mode hands us a DeepSpeed-managed module on cuda:0).
+    student_device = next(student.parameters()).device
 
     teacher = TeacherQueryPolicy(num_actions=env.num_actions)
     budget = BudgetController(
@@ -100,7 +103,7 @@ def collect(
         # is executed, so we use a one-step lookahead by reading internal hidden
         # state via the env's public probe API.
         while not done and step < max_steps:
-            obs_t = torch.tensor(obs, dtype=torch.float32)
+            obs_t = torch.tensor(obs, dtype=torch.float32, device=student_device)
             action, logits, entropy = student.act(obs_t, greedy=False)
             # Pre-step probe: ask the env for whatever hidden state the
             # teacher is allowed to see. The default BaseEnv impl returns
