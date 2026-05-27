@@ -8,7 +8,10 @@ set -euo pipefail
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 APP_DIR="$(dirname "$HERE")"
 ROLLOUTS="${ROLLOUTS:-rollouts.jsonl}"
-CKPT="${CHECKPOINT:-checkpoints/student.pt}"
+# Use ${VAR-default} (not ${VAR:-default}) so that CHECKPOINT="" is treated
+# as "explicitly empty" (random-init eval), not silently falling back to the
+# default path.
+CKPT="${CHECKPOINT-checkpoints/student.pt}"
 PREFIX="${EVAL_PREFIX:-}"
 
 python "$APP_DIR/eval/eval_success.py" \
