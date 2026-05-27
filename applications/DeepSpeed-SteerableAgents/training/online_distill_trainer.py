@@ -126,9 +126,18 @@ def train(
 
     student.train()
     history = []
+    if engine is not None:
+        device = engine.device
+    else:
+        device = next(student.parameters()).device
     for step in range(1, num_steps + 1):
         batch = buffer.sample(batch_size)
         obs, tgt, teacher_logits, weights = _batch_tensors(batch, num_actions)
+        obs = obs.to(device)
+        tgt = tgt.to(device)
+        weights = weights.to(device)
+        if teacher_logits is not None:
+            teacher_logits = teacher_logits.to(device)
 
         if engine is not None:
             logits = engine(obs)
@@ -148,7 +157,8 @@ def train(
 
     os.makedirs(output_dir, exist_ok=True)
     ckpt_path = os.path.join(output_dir, "student.pt")
-    torch.save(student.state_dict(), ckpt_path)
+    cpu_state = {k: v.detach().cpu() for k, v in student.state_dict().items()}
+    torch.save(cpu_state, ckpt_path)
     with open(os.path.join(output_dir, "train_history.json"), "w", encoding="utf-8") as f:
         json.dump(history, f, indent=2)
     print(f"[train] saved checkpoint -> {ckpt_path}")

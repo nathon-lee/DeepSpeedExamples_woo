@@ -1,3 +1,13 @@
 # Core deps for the MVP. DeepSpeed is optional; trainer falls back to vanilla PyTorch.
+#
+# System-level prerequisites (NOT installable via pip):
+#   - To use DeepSpeed together with mpi4py you need an MPI runtime, e.g.
+#     on Debian/Ubuntu:
+#         apt-get update && apt-get install -y libopenmpi-dev openmpi-bin
+#   - If you do NOT need MPI, simply do not install mpi4py and DeepSpeed will
+#     run in single-process mode. The trainer also falls back to vanilla
+#     PyTorch when DeepSpeed init fails for any reason.
+
 torch>=2.0
 deepspeed>=0.12 ; platform_system != "Windows"
+# mpi4py>=3.1 ; platform_system != "Windows"   # uncomment only if an MPI runtime is installed

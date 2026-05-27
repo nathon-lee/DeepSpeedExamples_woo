@@ -74,6 +74,22 @@ back to plain PyTorch if DeepSpeed is unavailable, so you can experiment
 without a GPU cluster.
 
 ```bash
+pip install -r requirements.txt
+```
+
+> **System dependencies (not pip-installable).** If you want to use DeepSpeed
+> together with `mpi4py`, you must also install an MPI runtime, e.g. on
+> Debian/Ubuntu:
+>
+> ```bash
+> apt-get update && apt-get install -y libopenmpi-dev openmpi-bin
+> ```
+>
+> If you don't need MPI, simply skip `mpi4py`; DeepSpeed will run in
+> single-process mode and the trainer will fall back to vanilla PyTorch on any
+> DeepSpeed init failure.
+
+```bash
 # 1) Collect rollouts with budgeted teacher steering -> rollouts.jsonl
 bash scripts/run_collect.sh
 
