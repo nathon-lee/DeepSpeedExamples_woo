@@ -304,13 +304,18 @@ ENV=v2 HORIZON=8 EPISODE_STEPS=24 NUM_ACTIONS=4 \
     bash ../scripts/run_train.sh
 
 # Eval the produced checkpoint exactly the same way as the offline path.
+# Note: rounds mode does not write a top-level `rollouts.jsonl`; point
+# ROLLOUTS at the *last* round's artefact (the rollouts produced by the
+# most-trained student) so eval_budget / eval_steerability have inputs.
 ENV=v2 HORIZON=8 EPISODE_STEPS=24 NUM_EVAL_EPISODES=256 \
     CHECKPOINT=ckpt_rounds.pt \
+    ROLLOUTS=_round_10_rollouts.jsonl \
     EVAL_PREFIX=rounds_ bash ../scripts/run_eval.sh
 ```
 
 Per-round artefacts (`_round_R_rollouts.jsonl`) are written next to the
-output checkpoint so the run is reproducible. To warm-start a rounds run
+output checkpoint so the run is reproducible (and so they're easy to
+hand to the eval scripts as shown above). To warm-start a rounds run
 from a previously collected offline JSONL, set `SEED_ROLLOUTS=...`.
 
 ### Evaluation hooks (`eval/`)
