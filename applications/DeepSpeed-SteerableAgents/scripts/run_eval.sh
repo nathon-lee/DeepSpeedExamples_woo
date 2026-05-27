@@ -8,7 +8,10 @@ set -euo pipefail
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 APP_DIR="$(dirname "$HERE")"
 ROLLOUTS="${ROLLOUTS:-rollouts.jsonl}"
-CKPT="${CHECKPOINT:-checkpoints/student.pt}"
+# Use ${VAR-default} (not ${VAR:-default}) so that CHECKPOINT="" is treated
+# as "explicitly empty" (random-init eval), not silently falling back to the
+# default path.
+CKPT="${CHECKPOINT-checkpoints/student.pt}"
 PREFIX="${EVAL_PREFIX:-}"
 
 python "$APP_DIR/eval/eval_success.py" \
@@ -19,6 +22,7 @@ python "$APP_DIR/eval/eval_success.py" \
     --seed "${EVAL_SEED:-1234}" \
     --env "${ENV:-v1}" \
     ${EPISODE_STEPS:+--episode-steps "$EPISODE_STEPS"} \
+    ${ALLOW_RANDOM_INIT:+--allow-random-init} \
     --output "${PREFIX}eval_success.json"
 
 python "$APP_DIR/eval/eval_budget.py" \

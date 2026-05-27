@@ -257,17 +257,61 @@ Heuristic controller combining:
 - remaining per-episode + global budget.
 
 ### Teacher query policy (`training/teacher_query_policy.py`)
-Rule-based simulated teacher that emits the most useful `InterventionEvent`
-given current env state.
+Rule-based simulated teacher that (a) decides *which* `InterventionEvent`
+kind to emit given env probe info + student uncertainty, and (b) attaches
+a **smoothed peaked `teacher_logits`** vector to every action-bearing
+intervention payload so the trainer can compute a real KL term between
+student and teacher distributions, not just behaviour-clone the argmax.
+The peak is sharper for `action_veto` than for `plan_correction` to
+reflect that vetoes are higher-confidence corrections.
 
 ### Replay buffer (`data/replay_buffer.py`)
 Bounded buffer with optional prioritization by sample `quality` score.
 
 ### Online distillation trainer (`training/online_distill_trainer.py`)
-- Initializes the student via DeepSpeed (if available).
-- Loops over replay-buffer mini-batches.
-- Computes a placeholder behavior-cloning + KL distillation loss on
-  intervention-supervised steps.
+Two execution modes:
+
+* **Offline (default, `ROUNDS=0`):** load a frozen rollouts JSONL once,
+  fill the replay buffer, train `NUM_STEPS` updates. Trainer asserts
+  `obs_dim` matches the env config (fails loud on a mismatched env /
+  num_actions / horizon between collection and training).
+* **Rounds / online (`ROUNDS>0`):** alternates
+  `collect (with the current student) -> extend replay buffer ->
+  train NUM_STEPS_PER_ROUND` for `ROUNDS` rounds. This is what makes
+  the "Online" in *Online Policy Distillation* defensible: as the
+  student improves, its uncertainty distribution shifts and the budget
+  gate fires on the actually-hard states, not on a snapshot from a
+  random initial policy. The collector is invoked in-process and the
+  *in-memory* student weights are reused (no checkpoint round-trip).
+
+Both paths use the same `distill_loss = CE + kl_coeff * KL` and the same
+DeepSpeed/PyTorch fallback. Teacher logits are now always present on
+action-bearing samples, so the KL term is genuinely active.
+
+#### Online / rounds mode (recipe)
+
+A single command, no separate `run_collect.sh`:
+
+```bash
+cd applications/DeepSpeed-SteerableAgents
+mkdir -p rounds_run && cd rounds_run
+
+ENV=v2 HORIZON=8 EPISODE_STEPS=24 NUM_ACTIONS=4 \
+    ROUNDS=10 EPISODES_PER_ROUND=64 NUM_STEPS_PER_ROUND=200 \
+    GLOBAL_BUDGET_PER_ROUND=128 PER_EP_BUDGET=4 THRESHOLD=0 \
+    BATCH_SIZE=64 CAPACITY=20000 \
+    CHECKPOINT=ckpt_rounds.pt \
+    bash ../scripts/run_train.sh
+
+# Eval the produced checkpoint exactly the same way as the offline path.
+ENV=v2 HORIZON=8 EPISODE_STEPS=24 NUM_EVAL_EPISODES=256 \
+    CHECKPOINT=ckpt_rounds.pt \
+    EVAL_PREFIX=rounds_ bash ../scripts/run_eval.sh
+```
+
+Per-round artefacts (`_round_R_rollouts.jsonl`) are written next to the
+output checkpoint so the run is reproducible. To warm-start a rounds run
+from a previously collected offline JSONL, set `SEED_ROLLOUTS=...`.
 
 ### Evaluation hooks (`eval/`)
 Independent scripts for success rate, intervention usage / budget, basic
@@ -276,6 +320,12 @@ and a cross-experiment **uplift aggregator** (`eval_uplift.py`) that
 joins a baseline `eval_success.json` with one or more steered
 `(success, budget)` report pairs and reports
 `success_uplift` and `cost_per_uplift_point` per run.
+
+`eval/eval_success.py` is **strict by default**: if `--checkpoint` points
+at a missing file, or the saved weights don't match the env's current
+`obs_dim`/`num_actions`, it raises rather than silently evaluating a
+random-init policy. Pass `--allow-random-init` (or `ALLOW_RANDOM_INIT=1`
+for `run_eval.sh`) when you genuinely want a random-policy baseline.
 
 ---
 
