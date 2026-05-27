@@ -1,0 +1,15 @@
+#!/usr/bin/env bash
+# Collect steered rollouts using the toy long-horizon env.
+set -euo pipefail
+HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+APP_DIR="$(dirname "$HERE")"
+cd "$APP_DIR"
+python training/collect_rollouts.py \
+    --num-episodes "${NUM_EPISODES:-64}" \
+    --horizon "${HORIZON:-32}" \
+    --num-actions "${NUM_ACTIONS:-4}" \
+    --global-budget "${GLOBAL_BUDGET:-128}" \
+    --per-episode-budget "${PER_EP_BUDGET:-4}" \
+    --threshold "${THRESHOLD:-0.6}" \
+    --seed "${SEED:-0}" \
+    --output "${OUTPUT:-rollouts.jsonl}"
