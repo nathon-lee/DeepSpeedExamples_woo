@@ -35,4 +35,5 @@ python "$APP_DIR/training/online_distill_trainer.py" \
     --per-episode-budget "${PER_EP_BUDGET:-4}" \
     --threshold "${THRESHOLD:-0.6}" \
     ${SEED_ROLLOUTS:+--seed-rollouts "$SEED_ROLLOUTS"} \
+    ${KL_COEFF:+--kl-coeff "$KL_COEFF"} \
     ${PRIORITIZED:+--prioritized}

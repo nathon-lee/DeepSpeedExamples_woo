@@ -118,6 +118,7 @@ def _train_steps(
     history: list,
     log_prefix: str = "train",
     global_step_offset: int = 0,
+    kl_coeff: float = 0.5,
 ) -> int:
     """Run ``num_steps`` of distillation updates on samples in ``buffer``.
 
@@ -138,22 +139,26 @@ def _train_steps(
 
         if engine is not None:
             logits = engine(obs)
-            loss = distill_loss(logits, tgt, teacher_logits, weights)
+            loss = distill_loss(
+                logits, tgt, teacher_logits, weights, kl_coeff=kl_coeff,
+            )
             engine.backward(loss)
             engine.step()
         else:
             optimizer.zero_grad()
             logits = student(obs)
-            loss = distill_loss(logits, tgt, teacher_logits, weights)
+            loss = distill_loss(
+                logits, tgt, teacher_logits, weights, kl_coeff=kl_coeff,
+            )
             loss.backward()
             optimizer.step()
 
         g_step = global_step_offset + step
         if g_step % log_every == 0 or step == 1:
-            has_kl = teacher_logits is not None
+            kl_active = teacher_logits is not None and kl_coeff > 0
             print(
                 f"[{log_prefix}] step={g_step} loss={float(loss.item()):.4f}"
-                f" kl={'on' if has_kl else 'off'}"
+                f" kl={'on' if kl_active else 'off'}"
             )
             history.append({"step": g_step, "loss": float(loss.item())})
     return global_step_offset + num_steps
@@ -172,6 +177,7 @@ def train(
     obs_dim: int,
     log_every: int = 50,
     checkpoint_path: str = "",
+    kl_coeff: float = 0.5,
 ) -> None:
     """Offline path: load JSONL once, train ``num_steps`` updates."""
     torch.manual_seed(seed)
@@ -214,6 +220,7 @@ def train(
         student=student, engine=engine, optimizer=optimizer, device=device,
         buffer=buffer, num_steps=num_steps, batch_size=batch_size,
         num_actions=num_actions, log_every=log_every, history=history,
+        kl_coeff=kl_coeff,
     )
     _save_checkpoint(student, output_dir, checkpoint_path, history=history)
 
@@ -238,6 +245,7 @@ def train_rounds(
     checkpoint_path: str,
     log_every: int = 50,
     seed_rollouts_path: str = "",
+    kl_coeff: float = 0.5,
 ) -> None:
     """Streaming / online path: alternate collect -> extend -> train K steps."""
     torch.manual_seed(seed)
@@ -313,6 +321,7 @@ def train_rounds(
             batch_size=batch_size, num_actions=num_actions,
             log_every=log_every, history=history,
             log_prefix=f"train-rounds.r{r}", global_step_offset=global_step,
+            kl_coeff=kl_coeff,
         )
 
     _save_checkpoint(student, output_dir, checkpoint_path, history=history)
@@ -389,6 +398,11 @@ def _parse_args() -> argparse.Namespace:
         help="Optional path to a previously collected JSONL used to "
              "warm-start the replay buffer in rounds mode.",
     )
+    p.add_argument(
+        "--kl-coeff", type=float, default=0.5,
+        help="Weight on the KL-to-teacher term. Set to 0 for a BC-only "
+             "ablation (the loss collapses to weighted cross-entropy).",
+    )
 
     # Let DeepSpeed swallow its own flags when launched via `deepspeed`.
     p.add_argument("--local_rank", type=int, default=-1)
@@ -423,6 +437,7 @@ if __name__ == "__main__":
             output_dir=args.output_dir,
             checkpoint_path=args.checkpoint_path,
             seed_rollouts_path=args.seed_rollouts,
+            kl_coeff=args.kl_coeff,
         )
     else:
         train(
@@ -437,4 +452,5 @@ if __name__ == "__main__":
             num_actions=probe_env.num_actions,
             obs_dim=probe_env.obs_dim,
             checkpoint_path=args.checkpoint_path,
+            kl_coeff=args.kl_coeff,
         )
