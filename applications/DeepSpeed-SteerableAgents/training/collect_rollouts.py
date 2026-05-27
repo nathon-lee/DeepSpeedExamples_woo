@@ -16,7 +16,7 @@ import argparse
 import os
 import sys
 import uuid
-from typing import List
+from typing import Any, Dict, List, Optional
 
 import torch
 
@@ -34,7 +34,7 @@ from data.schema import (  # noqa: E402
     TaskSpec,
     Trajectory,
 )
-from envs.toy_long_horizon_env import ToyLongHorizonEnv  # noqa: E402
+from envs.factory import make_env  # noqa: E402
 from models.policy_heads import MLPPolicy  # noqa: E402
 from training.budget_controller import BudgetController  # noqa: E402
 from training.teacher_query_policy import TeacherQueryPolicy  # noqa: E402
@@ -50,10 +50,18 @@ def collect(
     seed: int,
     output_path: str,
     checkpoint: str = "",
+    env_name: str = "v1",
+    episode_steps: Optional[int] = None,
 ) -> List[Trajectory]:
     torch.manual_seed(seed)
 
-    env = ToyLongHorizonEnv(num_actions=num_actions, horizon=horizon, seed=seed)
+    env_kwargs: Dict[str, Any] = {}
+    if env_name == "v2" and episode_steps is not None:
+        env_kwargs["episode_steps"] = int(episode_steps)
+    env = make_env(
+        env_name, num_actions=num_actions, horizon=horizon, seed=seed,
+        **env_kwargs,
+    )
     student = MLPPolicy(obs_dim=env.obs_dim, num_actions=env.num_actions)
     if checkpoint and os.path.isfile(checkpoint):
         student.load_state_dict(torch.load(checkpoint, map_location="cpu"))
@@ -67,6 +75,8 @@ def collect(
     )
 
     trajectories: List[Trajectory] = []
+    # Honour the env's own episode length (V2 may allow > horizon steps).
+    max_steps = getattr(env, "episode_steps", horizon)
     for ep in range(num_episodes):
         budget.state.reset_episode()
         obs = env.reset()
@@ -74,7 +84,7 @@ def collect(
             task_id=uuid.uuid4().hex,
             goal="reach progress >= horizon without hitting a trap",
             horizon=horizon,
-            metadata={"episode_index": ep},
+            metadata={"episode_index": ep, "episode_steps": max_steps},
         )
         traj = Trajectory(task=task)
         total_reward = 0.0
@@ -87,7 +97,7 @@ def collect(
         # state via a soft API: env exposes oracle/trap in step()'s info AFTER the
         # action. To still let the teacher veto traps, we ask the env for its
         # currently-sampled oracle/trap via a non-public probe.
-        while not done and step < horizon:
+        while not done and step < max_steps:
             obs_t = torch.tensor(obs, dtype=torch.float32)
             action, logits, entropy = student.act(obs_t, greedy=False)
             # Pre-step probe: peek at the env's hidden state for the teacher.
@@ -99,7 +109,7 @@ def collect(
 
             executed_action = action
             iv: InterventionEvent | None = None
-            if budget.should_intervene(entropy, step, horizon):
+            if budget.should_intervene(entropy, step, max_steps):
                 iv = teacher.query(
                     step=step,
                     proposed_action=action,
@@ -171,6 +181,14 @@ def _parse_args() -> argparse.Namespace:
     p.add_argument("--seed", type=int, default=0)
     p.add_argument("--output", type=str, default="rollouts.jsonl")
     p.add_argument("--checkpoint", type=str, default="")
+    p.add_argument("--env", type=str, default="v1", choices=["v1", "v2"])
+    p.add_argument(
+        "--episode-steps",
+        type=int,
+        default=None,
+        help="V2 only: cap on episode length; defaults to --horizon. "
+             "Set larger than --horizon for a smoother budget-vs-success curve.",
+    )
     return p.parse_args()
 
 
@@ -186,4 +204,6 @@ if __name__ == "__main__":
         seed=args.seed,
         output_path=args.output,
         checkpoint=args.checkpoint,
+        env_name=args.env,
+        episode_steps=args.episode_steps,
     )

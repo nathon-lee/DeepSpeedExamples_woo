@@ -27,7 +27,7 @@ if APP_DIR not in sys.path:
 from data.intervention_dataset import load_distillation_samples  # noqa: E402
 from data.replay_buffer import ReplayBuffer  # noqa: E402
 from data.schema import DistillationSample  # noqa: E402
-from envs.toy_long_horizon_env import ToyLongHorizonEnv  # noqa: E402
+from envs.factory import make_env  # noqa: E402
 from models.policy_heads import MLPPolicy  # noqa: E402
 
 try:
@@ -81,15 +81,22 @@ def train(
     num_actions: int,
     obs_dim: int,
     log_every: int = 50,
+    checkpoint_path: str = "",
 ) -> None:
     torch.manual_seed(seed)
 
     samples = load_distillation_samples(rollouts_path)
     if not samples:
-        raise RuntimeError(
-            f"No distillation samples found in {rollouts_path}. "
-            "Did the collector produce any interventions?"
+        # For a B=0 baseline run there are legitimately no interventions to
+        # distil from. Don't error out -- just skip the loop and save the
+        # (randomly initialised) student so downstream eval has a checkpoint.
+        print(
+            f"[train] WARNING: no distillation samples in {rollouts_path}; "
+            "saving an untrained checkpoint for baseline comparison."
         )
+        student = MLPPolicy(obs_dim=obs_dim, num_actions=num_actions)
+        _save_checkpoint(student, output_dir, checkpoint_path, history=[])
+        return
 
     buffer = ReplayBuffer(
         capacity=capacity, prioritized=prioritized, seed=seed
@@ -126,9 +133,18 @@ def train(
 
     student.train()
     history = []
+    if engine is not None:
+        device = engine.device
+    else:
+        device = next(student.parameters()).device
     for step in range(1, num_steps + 1):
         batch = buffer.sample(batch_size)
         obs, tgt, teacher_logits, weights = _batch_tensors(batch, num_actions)
+        obs = obs.to(device)
+        tgt = tgt.to(device)
+        weights = weights.to(device)
+        if teacher_logits is not None:
+            teacher_logits = teacher_logits.to(device)
 
         if engine is not None:
             logits = engine(obs)
@@ -146,10 +162,25 @@ def train(
             print(f"[train] step={step}/{num_steps} loss={float(loss.item()):.4f}")
             history.append({"step": step, "loss": float(loss.item())})
 
-    os.makedirs(output_dir, exist_ok=True)
-    ckpt_path = os.path.join(output_dir, "student.pt")
-    torch.save(student.state_dict(), ckpt_path)
-    with open(os.path.join(output_dir, "train_history.json"), "w", encoding="utf-8") as f:
+    _save_checkpoint(student, output_dir, checkpoint_path, history=history)
+
+
+def _save_checkpoint(
+    student: torch.nn.Module,
+    output_dir: str,
+    checkpoint_path: str,
+    history: list,
+) -> None:
+    if checkpoint_path:
+        ckpt_path = checkpoint_path
+        ckpt_dir = os.path.dirname(os.path.abspath(ckpt_path)) or "."
+    else:
+        ckpt_dir = output_dir
+        ckpt_path = os.path.join(ckpt_dir, "student.pt")
+    os.makedirs(ckpt_dir, exist_ok=True)
+    cpu_state = {k: v.detach().cpu() for k, v in student.state_dict().items()}
+    torch.save(cpu_state, ckpt_path)
+    with open(os.path.join(ckpt_dir, "train_history.json"), "w", encoding="utf-8") as f:
         json.dump(history, f, indent=2)
     print(f"[train] saved checkpoint -> {ckpt_path}")
 
@@ -168,8 +199,16 @@ def _parse_args() -> argparse.Namespace:
     p.add_argument("--prioritized", action="store_true")
     p.add_argument("--seed", type=int, default=0)
     p.add_argument("--output-dir", type=str, default="checkpoints")
+    p.add_argument(
+        "--checkpoint-path",
+        type=str,
+        default="",
+        help="Full path to write the checkpoint to. "
+             "Overrides --output-dir/student.pt when given.",
+    )
     p.add_argument("--horizon", type=int, default=32)
     p.add_argument("--num-actions", type=int, default=4)
+    p.add_argument("--env", type=str, default="v1", choices=["v1", "v2"])
     # Let DeepSpeed swallow its own flags when launched via `deepspeed`.
     p.add_argument("--local_rank", type=int, default=-1)
     return p.parse_args()
@@ -177,7 +216,9 @@ def _parse_args() -> argparse.Namespace:
 
 if __name__ == "__main__":
     args = _parse_args()
-    probe_env = ToyLongHorizonEnv(num_actions=args.num_actions, horizon=args.horizon)
+    probe_env = make_env(
+        args.env, num_actions=args.num_actions, horizon=args.horizon
+    )
     train(
         rollouts_path=args.rollouts,
         ds_config=args.ds_config,
@@ -189,4 +230,5 @@ if __name__ == "__main__":
         output_dir=args.output_dir,
         num_actions=probe_env.num_actions,
         obs_dim=probe_env.obs_dim,
+        checkpoint_path=args.checkpoint_path,
     )

@@ -48,6 +48,8 @@ applications/DeepSpeed-SteerableAgents/
   envs/
     base_env.py                   # Minimal env interface
     toy_long_horizon_env.py       # Toy multi-step env with failure modes
+    toy_long_horizon_env_v2.py    # Learnable variant (good/trap fixed per ep.)
+    factory.py                    # `make_env(name, ...)` switch
   models/
     policy_heads.py               # Toy student policy (MLP) + teacher stub
   training/
@@ -59,6 +61,7 @@ applications/DeepSpeed-SteerableAgents/
     eval_success.py               # Task success rate
     eval_steerability.py          # Steerability metrics
     eval_budget.py                # Budget consumption stats
+    eval_uplift.py                # Cross-experiment uplift / cost-per-uplift
   scripts/
     run_collect.sh
     run_train.sh
@@ -72,6 +75,22 @@ applications/DeepSpeed-SteerableAgents/
 Requires Python 3.9+, PyTorch, and (optionally) DeepSpeed. The trainer falls
 back to plain PyTorch if DeepSpeed is unavailable, so you can experiment
 without a GPU cluster.
+
+```bash
+pip install -r requirements.txt
+```
+
+> **System dependencies (not pip-installable).** If you want to use DeepSpeed
+> together with `mpi4py`, you must also install an MPI runtime, e.g. on
+> Debian/Ubuntu:
+>
+> ```bash
+> apt-get update && apt-get install -y libopenmpi-dev openmpi-bin
+> ```
+>
+> If you don't need MPI, simply skip `mpi4py`; DeepSpeed will run in
+> single-process mode and the trainer will fall back to vanilla PyTorch on any
+> DeepSpeed init failure.
 
 ```bash
 # 1) Collect rollouts with budgeted teacher steering -> rollouts.jsonl
@@ -99,12 +118,96 @@ can be edited/extended freely.
 `progress_update`, `request_help`, `plan_correction`, `action_veto`,
 `goal_redirect`.
 
-### Toy long-horizon environment (`envs/toy_long_horizon_env.py`)
-A deterministic-ish grid-of-decisions environment: at each step the agent picks
-one of `K` actions; a hidden "good action" advances progress; some actions are
-*trap* actions that fail the episode. Episodes are long enough (default 32
-steps) to be "long-horizon" in spirit. Supports intervention points after every
-step.
+### Toy long-horizon environment (`envs/`)
+
+Two variants are provided; select with `--env v1|v2` (or `ENV=v2` for the
+shell scripts).
+
+- **`v1` — `ToyLongHorizonEnv`** (default). The hidden good/trap actions are
+  resampled at *every* step and **not** revealed in the observation. The
+  pipeline runs end-to-end, but the supervised target is essentially noise
+  from the student's point of view, so distillation loss will plateau near
+  `log(num_actions)`. Useful for sanity-checking that the framework runs.
+- **`v2` — `ToyLongHorizonEnvV2`** (recommended for actual learning demos).
+  The good and trap actions are fixed for the duration of an episode and
+  exposed as one-hot fields inside the observation. With this env you should
+  see loss decrease, success-rate climb, and a measurable uplift from
+  steering.
+
+Example end-to-end run with V2:
+
+```bash
+ENV=v2 HORIZON=16 NUM_ACTIONS=4 NUM_EPISODES=512 \
+    GLOBAL_BUDGET=1024 PER_EP_BUDGET=4 THRESHOLD=0.4 \
+    bash scripts/run_collect.sh
+
+ENV=v2 HORIZON=16 NUM_ACTIONS=4 NUM_STEPS=3000 BATCH_SIZE=128 \
+    bash scripts/run_train.sh
+
+ENV=v2 HORIZON=16 NUM_ACTIONS=4 NUM_EVAL_EPISODES=256 \
+    bash scripts/run_eval.sh
+```
+
+#### V2 timing knobs (`episode_steps` / `progress_goal`)
+
+By default V2 requires the agent to accumulate `progress_goal == horizon`
+within `episode_steps == horizon` steps, which makes every unsteered step
+strictly fatal (any "wasted" step loses the episode) and produces a
+*step-function* budget-vs-success curve. For paper-style smooth curves,
+allow the episode to run longer than the progress goal:
+
+```bash
+# 8 "useful" actions needed, 24 steps allowed.
+ENV=v2 HORIZON=8 NUM_ACTIONS=4 EPISODE_STEPS=24 \
+    GLOBAL_BUDGET=4 PER_EP_BUDGET=4 THRESHOLD=0 \
+    bash scripts/run_collect.sh
+
+ENV=v2 HORIZON=8 NUM_ACTIONS=4 EPISODE_STEPS=24 \
+    bash scripts/run_eval.sh
+```
+
+`EPISODE_STEPS` is plumbed through `run_collect.sh` and `run_eval.sh` and
+the corresponding `--episode-steps` flags on `collect_rollouts.py` and
+`eval/eval_success.py`.
+
+#### Smooth budget sweep + uplift recipe
+
+Run the same setup across several budgets, then post-aggregate with
+`eval/eval_uplift.py` for a per-budget uplift / cost-per-uplift table:
+
+```bash
+HORIZON=8 ENV=v2 EPISODE_STEPS=24 NUM_EPISODES=512 \
+    NUM_EVAL_EPISODES=256 THRESHOLD=0
+for B in 0 1 2 3 4 6 8; do
+    GLOBAL_BUDGET=$B PER_EP_BUDGET=$B \
+        OUTPUT=rollouts_b${B}.jsonl bash scripts/run_collect.sh
+    # (optionally retrain the student here on rollouts_b${B}.jsonl)
+    ROLLOUTS=rollouts_b${B}.jsonl bash scripts/run_eval.sh
+    mv eval_success.json sweep_b${B}_success.json
+    mv eval_budget.json  sweep_b${B}_budget.json
+done
+
+python eval/eval_uplift.py \
+    --baseline sweep_b0_success.json \
+    --run b1:sweep_b1_success.json:sweep_b1_budget.json \
+    --run b2:sweep_b2_success.json:sweep_b2_budget.json \
+    --run b3:sweep_b3_success.json:sweep_b3_budget.json \
+    --run b4:sweep_b4_success.json:sweep_b4_budget.json \
+    --run b6:sweep_b6_success.json:sweep_b6_budget.json \
+    --run b8:sweep_b8_success.json:sweep_b8_budget.json \
+    --output uplift.json
+```
+
+Sample output (numbers will vary by seed / model):
+
+```
+baseline success_rate = 0.110
+name         succ   uplift     n_iv   cost/+1%
+b1          0.180   +0.070       512      73.14
+b2          0.320   +0.210      1024      48.76
+b4          0.640   +0.530      2048      38.64
+b8          0.980   +0.870      4096      47.08
+```
 
 ### Budget controller (`training/budget_controller.py`)
 Heuristic controller combining:
@@ -126,8 +229,12 @@ Bounded buffer with optional prioritization by sample `quality` score.
   intervention-supervised steps.
 
 ### Evaluation hooks (`eval/`)
-Independent scripts for success rate, intervention usage / budget, and basic
-steerability (avoided-bad-action rate, success uplift from intervention).
+Independent scripts for success rate, intervention usage / budget, basic
+steerability (avoided-bad-action rate, success uplift from intervention),
+and a cross-experiment **uplift aggregator** (`eval_uplift.py`) that
+joins a baseline `eval_success.json` with one or more steered
+`(success, budget)` report pairs and reports
+`success_uplift` and `cost_per_uplift_point` per run.
 
 ---
 
