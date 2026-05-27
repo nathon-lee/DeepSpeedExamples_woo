@@ -159,54 +159,95 @@ allow the episode to run longer than the progress goal:
 ```bash
 # 8 "useful" actions needed, 24 steps allowed.
 ENV=v2 HORIZON=8 NUM_ACTIONS=4 EPISODE_STEPS=24 \
-    GLOBAL_BUDGET=4 PER_EP_BUDGET=4 THRESHOLD=0 \
+    GLOBAL_BUDGET=256 PER_EP_BUDGET=4 THRESHOLD=0 \
     bash scripts/run_collect.sh
-
-ENV=v2 HORIZON=8 NUM_ACTIONS=4 EPISODE_STEPS=24 \
-    bash scripts/run_eval.sh
 ```
 
-`EPISODE_STEPS` is plumbed through `run_collect.sh` and `run_eval.sh` and
-the corresponding `--episode-steps` flags on `collect_rollouts.py` and
-`eval/eval_success.py`.
+`EPISODE_STEPS` is plumbed through `run_collect.sh` / `run_train.sh` /
+`run_eval.sh` and the corresponding `--episode-steps` flag on
+`collect_rollouts.py` and `eval/eval_success.py`. See the next section
+for a full sweep that actually trains a per-budget student.
 
 #### Smooth budget sweep + uplift recipe
 
-Run the same setup across several budgets, then post-aggregate with
-`eval/eval_uplift.py` for a per-budget uplift / cost-per-uplift table:
+Run the full collect → train → eval pipeline across several budgets, then
+post-aggregate with `eval/eval_uplift.py` for a per-budget uplift /
+cost-per-uplift table. **Each budget must train its own student** —
+without per-budget checkpoints every eval would reload the same model
+and the table collapses to the baseline. The shell helpers resolve all
+paths against the caller's cwd, so it's safe to run the loop from a
+sub-directory:
 
 ```bash
-HORIZON=8 ENV=v2 EPISODE_STEPS=24 NUM_EPISODES=512 \
-    NUM_EVAL_EPISODES=256 THRESHOLD=0
+cd applications/DeepSpeed-SteerableAgents
+mkdir -p sweep && cd sweep
+
+HORIZON=8
+EPISODE_STEPS=24
+ENV=v2
+NUM_EPISODES=512
+NUM_STEPS=2000
+NUM_EVAL_EPISODES=256
+
 for B in 0 1 2 3 4 6 8; do
-    GLOBAL_BUDGET=$B PER_EP_BUDGET=$B \
-        OUTPUT=rollouts_b${B}.jsonl bash scripts/run_collect.sh
-    # (optionally retrain the student here on rollouts_b${B}.jsonl)
-    ROLLOUTS=rollouts_b${B}.jsonl bash scripts/run_eval.sh
-    mv eval_success.json sweep_b${B}_success.json
-    mv eval_budget.json  sweep_b${B}_budget.json
+    echo "=== budget=$B ==="
+    # 1) collect rollouts at this budget
+    ENV=$ENV HORIZON=$HORIZON EPISODE_STEPS=$EPISODE_STEPS \
+        NUM_EPISODES=$NUM_EPISODES \
+        GLOBAL_BUDGET=$((B*NUM_EPISODES)) PER_EP_BUDGET=$B THRESHOLD=0 \
+        OUTPUT=roll_b${B}.jsonl bash ../scripts/run_collect.sh
+
+    # 2) train a per-budget student (B=0 just saves an untrained ckpt)
+    ENV=$ENV HORIZON=$HORIZON EPISODE_STEPS=$EPISODE_STEPS \
+        NUM_STEPS=$NUM_STEPS BATCH_SIZE=128 \
+        ROLLOUTS=roll_b${B}.jsonl \
+        CHECKPOINT=ckpt_b${B}.pt bash ../scripts/run_train.sh
+
+    # 3) eval that checkpoint; EVAL_PREFIX renames the three reports
+    ENV=$ENV HORIZON=$HORIZON EPISODE_STEPS=$EPISODE_STEPS \
+        NUM_EVAL_EPISODES=$NUM_EVAL_EPISODES \
+        CHECKPOINT=ckpt_b${B}.pt \
+        ROLLOUTS=roll_b${B}.jsonl \
+        EVAL_PREFIX=b${B}_ bash ../scripts/run_eval.sh
 done
 
-python eval/eval_uplift.py \
-    --baseline sweep_b0_success.json \
-    --run b1:sweep_b1_success.json:sweep_b1_budget.json \
-    --run b2:sweep_b2_success.json:sweep_b2_budget.json \
-    --run b3:sweep_b3_success.json:sweep_b3_budget.json \
-    --run b4:sweep_b4_success.json:sweep_b4_budget.json \
-    --run b6:sweep_b6_success.json:sweep_b6_budget.json \
-    --run b8:sweep_b8_success.json:sweep_b8_budget.json \
+python ../eval/eval_uplift.py \
+    --baseline b0_eval_success.json \
+    --run b1:b1_eval_success.json:b1_eval_budget.json \
+    --run b2:b2_eval_success.json:b2_eval_budget.json \
+    --run b3:b3_eval_success.json:b3_eval_budget.json \
+    --run b4:b4_eval_success.json:b4_eval_budget.json \
+    --run b6:b6_eval_success.json:b6_eval_budget.json \
+    --run b8:b8_eval_success.json:b8_eval_budget.json \
     --output uplift.json
 ```
 
-Sample output (numbers will vary by seed / model):
+Sample output from the recipe above (numbers vary by seed):
 
 ```
-baseline success_rate = 0.110
+baseline success_rate = 0.004
 name         succ   uplift     n_iv   cost/+1%
-b1          0.180   +0.070       512      73.14
-b2          0.320   +0.210      1024      48.76
-b4          0.640   +0.530      2048      38.64
-b8          0.980   +0.870      4096      47.08
+b1          0.996   +0.992      512       5.16
+b2          0.996   +0.992     1024      10.32
+b3          0.996   +0.992     1536      15.48
+b4          0.992   +0.988     2048      20.72
+b6          0.988   +0.984     3072      31.21
+b8          0.984   +0.980     4096      41.78
+```
+
+Reading this table: distillation converts even a single hint per episode
+into near-perfect policy performance, so the curve **saturates at the
+bottom** and `cost_per_uplift_point` rises monotonically — B=1 is the
+sweet spot for this regime. To expose a fuller S-curve where small B
+genuinely underperforms, make the task harder (larger `NUM_ACTIONS`,
+larger `HORIZON`, fewer `NUM_EPISODES`) so a single hint no longer
+suffices, e.g.:
+
+```bash
+HORIZON=16 NUM_ACTIONS=8 EPISODE_STEPS=48 \
+NUM_EPISODES=128 NUM_STEPS=1500 BATCH_SIZE=64 \
+NUM_EVAL_EPISODES=256 ENV=v2
+# then sweep B in 0 1 2 4 6 8 10 12 14 16
 ```
 
 ### Budget controller (`training/budget_controller.py`)
