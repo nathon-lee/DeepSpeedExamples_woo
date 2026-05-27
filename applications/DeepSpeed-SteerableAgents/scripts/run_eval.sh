@@ -13,6 +13,7 @@ python eval/eval_success.py \
     --horizon "${HORIZON:-32}" \
     --num-actions "${NUM_ACTIONS:-4}" \
     --seed "${EVAL_SEED:-1234}" \
+    --env "${ENV:-v1}" \
     --output eval_success.json
 
 python eval/eval_budget.py --rollouts "$ROLLOUTS" --output eval_budget.json

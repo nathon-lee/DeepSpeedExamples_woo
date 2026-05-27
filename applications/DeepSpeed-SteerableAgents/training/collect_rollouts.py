@@ -34,7 +34,7 @@ from data.schema import (  # noqa: E402
     TaskSpec,
     Trajectory,
 )
-from envs.toy_long_horizon_env import ToyLongHorizonEnv  # noqa: E402
+from envs.factory import make_env  # noqa: E402
 from models.policy_heads import MLPPolicy  # noqa: E402
 from training.budget_controller import BudgetController  # noqa: E402
 from training.teacher_query_policy import TeacherQueryPolicy  # noqa: E402
@@ -50,10 +50,11 @@ def collect(
     seed: int,
     output_path: str,
     checkpoint: str = "",
+    env_name: str = "v1",
 ) -> List[Trajectory]:
     torch.manual_seed(seed)
 
-    env = ToyLongHorizonEnv(num_actions=num_actions, horizon=horizon, seed=seed)
+    env = make_env(env_name, num_actions=num_actions, horizon=horizon, seed=seed)
     student = MLPPolicy(obs_dim=env.obs_dim, num_actions=env.num_actions)
     if checkpoint and os.path.isfile(checkpoint):
         student.load_state_dict(torch.load(checkpoint, map_location="cpu"))
@@ -171,6 +172,7 @@ def _parse_args() -> argparse.Namespace:
     p.add_argument("--seed", type=int, default=0)
     p.add_argument("--output", type=str, default="rollouts.jsonl")
     p.add_argument("--checkpoint", type=str, default="")
+    p.add_argument("--env", type=str, default="v1", choices=["v1", "v2"])
     return p.parse_args()
 
 
@@ -186,4 +188,5 @@ if __name__ == "__main__":
         seed=args.seed,
         output_path=args.output,
         checkpoint=args.checkpoint,
+        env_name=args.env,
     )

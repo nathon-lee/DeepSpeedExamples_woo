@@ -27,7 +27,7 @@ if APP_DIR not in sys.path:
 from data.intervention_dataset import load_distillation_samples  # noqa: E402
 from data.replay_buffer import ReplayBuffer  # noqa: E402
 from data.schema import DistillationSample  # noqa: E402
-from envs.toy_long_horizon_env import ToyLongHorizonEnv  # noqa: E402
+from envs.factory import make_env  # noqa: E402
 from models.policy_heads import MLPPolicy  # noqa: E402
 
 try:
@@ -180,6 +180,7 @@ def _parse_args() -> argparse.Namespace:
     p.add_argument("--output-dir", type=str, default="checkpoints")
     p.add_argument("--horizon", type=int, default=32)
     p.add_argument("--num-actions", type=int, default=4)
+    p.add_argument("--env", type=str, default="v1", choices=["v1", "v2"])
     # Let DeepSpeed swallow its own flags when launched via `deepspeed`.
     p.add_argument("--local_rank", type=int, default=-1)
     return p.parse_args()
@@ -187,7 +188,9 @@ def _parse_args() -> argparse.Namespace:
 
 if __name__ == "__main__":
     args = _parse_args()
-    probe_env = ToyLongHorizonEnv(num_actions=args.num_actions, horizon=args.horizon)
+    probe_env = make_env(
+        args.env, num_actions=args.num_actions, horizon=args.horizon
+    )
     train(
         rollouts_path=args.rollouts,
         ds_config=args.ds_config,

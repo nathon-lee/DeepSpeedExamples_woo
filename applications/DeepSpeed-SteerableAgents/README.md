@@ -115,12 +115,35 @@ can be edited/extended freely.
 `progress_update`, `request_help`, `plan_correction`, `action_veto`,
 `goal_redirect`.
 
-### Toy long-horizon environment (`envs/toy_long_horizon_env.py`)
-A deterministic-ish grid-of-decisions environment: at each step the agent picks
-one of `K` actions; a hidden "good action" advances progress; some actions are
-*trap* actions that fail the episode. Episodes are long enough (default 32
-steps) to be "long-horizon" in spirit. Supports intervention points after every
-step.
+### Toy long-horizon environment (`envs/`)
+
+Two variants are provided; select with `--env v1|v2` (or `ENV=v2` for the
+shell scripts).
+
+- **`v1` — `ToyLongHorizonEnv`** (default). The hidden good/trap actions are
+  resampled at *every* step and **not** revealed in the observation. The
+  pipeline runs end-to-end, but the supervised target is essentially noise
+  from the student's point of view, so distillation loss will plateau near
+  `log(num_actions)`. Useful for sanity-checking that the framework runs.
+- **`v2` — `ToyLongHorizonEnvV2`** (recommended for actual learning demos).
+  The good and trap actions are fixed for the duration of an episode and
+  exposed as one-hot fields inside the observation. With this env you should
+  see loss decrease, success-rate climb, and a measurable uplift from
+  steering.
+
+Example end-to-end run with V2:
+
+```bash
+ENV=v2 HORIZON=16 NUM_ACTIONS=4 NUM_EPISODES=512 \
+    GLOBAL_BUDGET=1024 PER_EP_BUDGET=4 THRESHOLD=0.4 \
+    bash scripts/run_collect.sh
+
+ENV=v2 HORIZON=16 NUM_ACTIONS=4 NUM_STEPS=3000 BATCH_SIZE=128 \
+    bash scripts/run_train.sh
+
+ENV=v2 HORIZON=16 NUM_ACTIONS=4 NUM_EVAL_EPISODES=256 \
+    bash scripts/run_eval.sh
+```
 
 ### Budget controller (`training/budget_controller.py`)
 Heuristic controller combining:

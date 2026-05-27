@@ -14,4 +14,5 @@ python training/online_distill_trainer.py \
     --output-dir "${OUTPUT_DIR:-checkpoints}" \
     --horizon "${HORIZON:-32}" \
     --num-actions "${NUM_ACTIONS:-4}" \
+    --env "${ENV:-v1}" \
     ${PRIORITIZED:+--prioritized}

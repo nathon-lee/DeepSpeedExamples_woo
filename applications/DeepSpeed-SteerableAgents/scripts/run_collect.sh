@@ -12,4 +12,5 @@ python training/collect_rollouts.py \
     --per-episode-budget "${PER_EP_BUDGET:-4}" \
     --threshold "${THRESHOLD:-0.6}" \
     --seed "${SEED:-0}" \
+    --env "${ENV:-v1}" \
     --output "${OUTPUT:-rollouts.jsonl}"

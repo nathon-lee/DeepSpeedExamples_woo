@@ -17,7 +17,7 @@ APP_DIR = os.path.dirname(THIS_DIR)
 if APP_DIR not in sys.path:
     sys.path.insert(0, APP_DIR)
 
-from envs.toy_long_horizon_env import ToyLongHorizonEnv  # noqa: E402
+from envs.factory import make_env  # noqa: E402
 from models.policy_heads import MLPPolicy  # noqa: E402
 
 
@@ -28,9 +28,10 @@ def evaluate(
     num_actions: int,
     seed: int,
     greedy: bool,
+    env_name: str = "v1",
 ) -> dict:
     torch.manual_seed(seed)
-    env = ToyLongHorizonEnv(num_actions=num_actions, horizon=horizon, seed=seed)
+    env = make_env(env_name, num_actions=num_actions, horizon=horizon, seed=seed)
     student = MLPPolicy(obs_dim=env.obs_dim, num_actions=env.num_actions)
     if checkpoint and os.path.isfile(checkpoint):
         student.load_state_dict(torch.load(checkpoint, map_location="cpu"))
@@ -77,6 +78,7 @@ def _parse_args() -> argparse.Namespace:
     p.add_argument("--num-actions", type=int, default=4)
     p.add_argument("--seed", type=int, default=1234)
     p.add_argument("--greedy", action="store_true")
+    p.add_argument("--env", type=str, default="v1", choices=["v1", "v2"])
     p.add_argument("--output", type=str, default="eval_success.json")
     return p.parse_args()
 
@@ -90,6 +92,7 @@ if __name__ == "__main__":
         num_actions=args.num_actions,
         seed=args.seed,
         greedy=args.greedy,
+        env_name=args.env,
     )
     with open(args.output, "w", encoding="utf-8") as f:
         json.dump(report, f, indent=2)
