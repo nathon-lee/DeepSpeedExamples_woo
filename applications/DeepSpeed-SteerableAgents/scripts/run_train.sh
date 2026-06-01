@@ -29,10 +29,15 @@ python "$APP_DIR/training/online_distill_trainer.py" \
     --env "${ENV:-v1}" \
     ${EPISODE_STEPS:+--episode-steps "$EPISODE_STEPS"} \
     --spend-mode "${SPEND_MODE:-adaptive}" \
-    --num-critical-nodes "${NUM_CRITICAL_NODES:-4}" \
-    --stochasticity "${STOCHASTICITY:-0.25}" \
-    --transition-noise "${TRANSITION_NOISE:-0.10}" \
+    ${DIFFICULTY:+--difficulty "$DIFFICULTY"} \
+    ${NUM_CRITICAL_NODES:+--num-critical-nodes "$NUM_CRITICAL_NODES"} \
+    ${STOCHASTICITY:+--stochasticity "$STOCHASTICITY"} \
+    ${TRANSITION_NOISE:+--transition-noise "$TRANSITION_NOISE"} \
+    ${INTERVENTION_EFFECT_SPAN:+--intervention-effect-span "$INTERVENTION_EFFECT_SPAN"} \
+    ${FAILURE_SOFTNESS:+--failure-softness "$FAILURE_SOFTNESS"} \
     ${REQUIRED_CRITICAL_PASSES:+--required-critical-passes "$REQUIRED_CRITICAL_PASSES"} \
+    ${RISK_THRESHOLD:+--risk-threshold "$RISK_THRESHOLD"} \
+    ${MIN_GAP_BETWEEN_INTERVENTIONS:+--min-gap-between-interventions "$MIN_GAP_BETWEEN_INTERVENTIONS"} \
     --rounds "${ROUNDS:-0}" \
     --episodes-per-round "${EPISODES_PER_ROUND:-64}" \
     --num-steps-per-round "${NUM_STEPS_PER_ROUND:-200}" \

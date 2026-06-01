@@ -1,25 +1,39 @@
-# Experiment Report — harder setting (v3 + adaptive spend)
+# Experiment Report — calibrated setting (v3 + adaptive spend + difficulty presets)
 
 Scope of this round:
-- Break the ceiling effect by increasing task difficulty.
+- Calibrate v3 to a mid-difficulty regime so budget has discriminative power.
 - Make intervention budget a true cap (adaptive spend).
-- Report all core experiments over 5 seeds with mean ± std.
+- Report all core experiments over 5 seeds with mean ± std, tagged by difficulty.
+
+## Difficulty presets
+
+`envs/toy_long_horizon_env_v3.py` ships three presets (explicit knobs override):
+
+| preset | nodes | horizon | stochasticity | transition_noise | span | softness | required passes |
+|---|---|---|---|---|---|---|---|
+| easy   | 2 | 16 | 0.05 | 0.05 | 2 | high   | ceil(0.5·n)=1/2 |
+| medium | 3 | 24 | 0.10 | 0.08 | 1 | medium | ceil(0.6·n)=2/3 |
+| hard   | 5 | 32 | 0.15 | 0.10 | 1 | low    | ceil(0.8·n)=4/5 |
+
+Key calibration levers (relative to the prior too-hard v3):
+- **Soft failure**: success needs only a fraction of critical nodes, not all of
+  them (`failure_softness` / `required_critical_passes`).
+- **Reliable, local interventions**: a steered step suppresses transition noise
+  and `intervention_effect_span` grants a short local follow-up advantage — but
+  never solves all future nodes.
+- **Smarter adaptive spend**: `risk_threshold` / `min_gap_between_interventions`
+  steer the limited budget toward critical / risky states.
 
 ## Config used in this round
 
 Environment:
 - env = `v3`
-- horizon = 40
-- episode_steps = 40
-- num_actions = 4
-- num_critical_nodes = 4
-- stochasticity = 0.25
-- transition_noise = 0.10
-- required_critical_passes = (unset -> defaults to num_critical_nodes)
+- difficulty = `medium` (paper-facing default; sweep all three to pick)
 
 Intervention control:
 - spend_mode = `adaptive` (default for this round)
 - forced mode still available via `SPEND_MODE=forced`
+- optional `RISK_THRESHOLD`, `MIN_GAP_BETWEEN_INTERVENTIONS`
 
 Training/eval:
 - num_steps = 2000
@@ -29,27 +43,29 @@ Training/eval:
 
 ## Repro commands
 
-Run three experiment groups:
+First calibrate (seed 0, all three presets) and read the comparison table:
 
 ```bash
-# 1) harder budget sweep (5 seeds)
-SEEDS="0 1 2 3 4" \
-ENV=v3 SPEND_MODE=adaptive \
-NUM_CRITICAL_NODES=4 STOCHASTICITY=0.25 TRANSITION_NOISE=0.10 \
+# Calibration: env=v3, adaptive, budgets {0,1,2,4,8}, presets easy/medium/hard
+bash experiments/exp_calibrate_v3.sh
+# -> results/calibrate_v3/calibration_compare.md
+```
+
+Then run the three experiment groups at the chosen difficulty (default medium):
+
+```bash
+# 1) budget sweep (5 seeds)
+SEEDS="0 1 2 3 4" ENV=v3 SPEND_MODE=adaptive DIFFICULTY=medium \
 BUDGETS="0 1 2 4 8" \
 bash experiments/exp_budget_sweep.sh
 
 # 2) distillation ablation (5 seeds)
-SEEDS="0 1 2 3 4" \
-ENV=v3 SPEND_MODE=adaptive \
-NUM_CRITICAL_NODES=4 STOCHASTICITY=0.25 TRANSITION_NOISE=0.10 \
+SEEDS="0 1 2 3 4" ENV=v3 SPEND_MODE=adaptive DIFFICULTY=medium \
 B=4 KL_BC=0.0 KL_BC_KL=0.5 \
 bash experiments/exp_distill_ablation.sh
 
 # 3) offline vs rounds (5 seeds)
-SEEDS="0 1 2 3 4" \
-ENV=v3 SPEND_MODE=adaptive \
-NUM_CRITICAL_NODES=4 STOCHASTICITY=0.25 TRANSITION_NOISE=0.10 \
+SEEDS="0 1 2 3 4" ENV=v3 SPEND_MODE=adaptive DIFFICULTY=medium \
 B=4 KL_COEFF=0.0 \
 ROUNDS=10 NUM_STEPS_PER_ROUND=200 EPISODES_PER_ROUND=64 \
 bash experiments/exp_offline_vs_rounds.sh
@@ -62,7 +78,7 @@ python experiments/aggregate_results.py results/ \
   --csv results/all.csv --markdown results/all.md
 
 python experiments/aggregate_results.py results/ \
-  --group-by experiment,mode,budget,kl_coeff,spend_mode,env \
+  --group-by experiment,mode,budget,kl_coeff,spend_mode,env,difficulty \
   --csv results/all_seed_stats.csv \
   --markdown results/all_seed_stats.md
 ```
@@ -111,14 +127,32 @@ Report:
 - Rounds: mean ± std
 - Whether rounds beats or matches offline under matched compute.
 
-## Ceiling-effect sanity check
+## Ceiling / floor sanity checks
 
-The aggregator now emits a warning if all rows have success_rate >= 0.98.
-If warning appears, difficulty tuning failed and env knobs should be raised:
-- increase `num_critical_nodes`
-- increase `stochasticity`
-- increase `transition_noise`
-- require more `required_critical_passes`
+The aggregator emits:
+- a **ceiling** warning if all rows have success_rate >= 0.98 (too easy), and
+- a **floor** warning if all budgeted (B>=1) rows have success_rate <= 0.02
+  (too hard / steering too weak).
+
+If the ceiling warning appears, move to a harder preset / raise knobs
+(`num_critical_nodes`, `stochasticity`, `transition_noise`,
+`required_critical_passes`). If the floor warning appears, move to an easier
+preset / lower `required_critical_passes`, raise `failure_softness`, or raise
+`intervention_effect_span`.
+
+## Calibration: picking a preset
+
+Read `results/calibrate_v3/calibration_compare.md` (grouped by difficulty,
+budget). Pick the preset whose success-vs-budget curve is closest to the
+target:
+
+| budget | target success |
+|---|---|
+| 0 | 0–5% |
+| 1 | 20–40% |
+| 2 | 35–60% |
+| 4 | 55–75% |
+| 8 | 70–90% |
 
 ## Explicit note on previous B=8 regression claim
 
@@ -134,6 +168,8 @@ from `results/budget_sweep/summary_seed_stats.md` after rerun.
 - `results/all.md`
 - `results/all_seed_stats.csv`
 - `results/all_seed_stats.md`
+- `results/calibrate_v3/calibration_all.{csv,md}`
+- `results/calibrate_v3/calibration_compare.{csv,md}`
 - `results/budget_sweep/summary_seed_stats.{csv,md}`
 - `results/distill_ablation/summary_seed_stats.{csv,md}`
 - `results/offline_vs_rounds/summary_seed_stats.{csv,md}`

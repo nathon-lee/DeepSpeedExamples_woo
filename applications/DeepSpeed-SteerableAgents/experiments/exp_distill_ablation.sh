@@ -10,13 +10,25 @@ APP_DIR="$(dirname "$HERE")"
 
 ENV="${ENV:-v3}"
 SPEND_MODE="${SPEND_MODE:-adaptive}"
-HORIZON="${HORIZON:-40}"
-EPISODE_STEPS="${EPISODE_STEPS:-40}"
+DIFFICULTY="${DIFFICULTY:-medium}"
 NUM_ACTIONS="${NUM_ACTIONS:-4}"
-NUM_CRITICAL_NODES="${NUM_CRITICAL_NODES:-4}"
-STOCHASTICITY="${STOCHASTICITY:-0.25}"
-TRANSITION_NOISE="${TRANSITION_NOISE:-0.10}"
+NUM_CRITICAL_NODES="${NUM_CRITICAL_NODES:-}"
+STOCHASTICITY="${STOCHASTICITY:-}"
+TRANSITION_NOISE="${TRANSITION_NOISE:-}"
+INTERVENTION_EFFECT_SPAN="${INTERVENTION_EFFECT_SPAN:-}"
+FAILURE_SOFTNESS="${FAILURE_SOFTNESS:-}"
 REQUIRED_CRITICAL_PASSES="${REQUIRED_CRITICAL_PASSES:-}"
+RISK_THRESHOLD="${RISK_THRESHOLD:-}"
+MIN_GAP_BETWEEN_INTERVENTIONS="${MIN_GAP_BETWEEN_INTERVENTIONS:-}"
+
+if [ -n "$DIFFICULTY" ] && [ "$ENV" = "v3" ]; then
+    _preset_h="$(PYTHONPATH="$APP_DIR" python -c "from envs.toy_long_horizon_env_v3 import DIFFICULTY_PRESETS as P; print(P['$DIFFICULTY']['horizon'])")"
+    HORIZON="${HORIZON:-$_preset_h}"
+    EPISODE_STEPS="${EPISODE_STEPS:-$_preset_h}"
+else
+    HORIZON="${HORIZON:-40}"
+    EPISODE_STEPS="${EPISODE_STEPS:-40}"
+fi
 
 NUM_EPISODES="${NUM_EPISODES:-512}"
 NUM_STEPS="${NUM_STEPS:-2000}"
@@ -46,8 +58,13 @@ run_one() {
     ENV=$ENV HORIZON=$HORIZON EPISODE_STEPS=$EPISODE_STEPS \
         NUM_ACTIONS=$NUM_ACTIONS NUM_STEPS=$NUM_STEPS BATCH_SIZE=$BATCH_SIZE \
         SEED=$seed KL_COEFF="$kl" SPEND_MODE=$SPEND_MODE \
+        DIFFICULTY=$DIFFICULTY \
         NUM_CRITICAL_NODES=$NUM_CRITICAL_NODES STOCHASTICITY=$STOCHASTICITY \
         TRANSITION_NOISE=$TRANSITION_NOISE \
+        INTERVENTION_EFFECT_SPAN=$INTERVENTION_EFFECT_SPAN \
+        FAILURE_SOFTNESS=$FAILURE_SOFTNESS \
+        RISK_THRESHOLD=$RISK_THRESHOLD \
+        MIN_GAP_BETWEEN_INTERVENTIONS=$MIN_GAP_BETWEEN_INTERVENTIONS \
         ${REQUIRED_CRITICAL_PASSES:+REQUIRED_CRITICAL_PASSES=$REQUIRED_CRITICAL_PASSES} \
         ROLLOUTS=roll_ablation_s${seed}.jsonl \
         CHECKPOINT="$ckpt" \
@@ -56,9 +73,12 @@ run_one() {
     eval_cmd=(
         ENV=$ENV HORIZON=$HORIZON EPISODE_STEPS=$EPISODE_STEPS
         NUM_ACTIONS=$NUM_ACTIONS NUM_EVAL_EPISODES=$NUM_EVAL_EPISODES
+        DIFFICULTY=$DIFFICULTY
         NUM_CRITICAL_NODES=$NUM_CRITICAL_NODES
         STOCHASTICITY=$STOCHASTICITY
         TRANSITION_NOISE=$TRANSITION_NOISE
+        INTERVENTION_EFFECT_SPAN=$INTERVENTION_EFFECT_SPAN
+        FAILURE_SOFTNESS=$FAILURE_SOFTNESS
         EVAL_SEED=$((seed + 1000))
         ROLLOUTS=roll_ablation_s${seed}.jsonl
         CHECKPOINT=$ckpt
@@ -80,6 +100,7 @@ run_one() {
         --kl-coeff "$kl" \
         --spend-mode "$SPEND_MODE" \
         --env "$ENV" \
+        --difficulty "$DIFFICULTY" \
         --horizon "$HORIZON" \
         --episode-steps "$EPISODE_STEPS" \
         --num-actions "$NUM_ACTIONS" \
@@ -88,7 +109,7 @@ run_one() {
         --eval-budget "$(pwd)/${tag}_s${seed}_eval_budget.json" \
         --eval-steerability "$(pwd)/${tag}_s${seed}_eval_steerability.json" \
         --wall-time-sec "$((t_end - t_start))" \
-        --extra-json "{\"variant\":\"$tag\",\"num_critical_nodes\":$NUM_CRITICAL_NODES,\"stochasticity\":$STOCHASTICITY,\"transition_noise\":$TRANSITION_NOISE}" \
+        --extra-json "{\"variant\":\"$tag\",\"difficulty\":\"$DIFFICULTY\"}" \
         --out "../../$RESULTS_DIR/${tag}_s${seed}.json"
 }
 
@@ -100,9 +121,14 @@ for SEED in $SEEDS; do
         NUM_ACTIONS=$NUM_ACTIONS NUM_EPISODES=$NUM_EPISODES
         GLOBAL_BUDGET=$((B * NUM_EPISODES)) PER_EP_BUDGET=$B
         THRESHOLD=$THRESHOLD SEED=$SEED SPEND_MODE=$SPEND_MODE
+        DIFFICULTY=$DIFFICULTY
         NUM_CRITICAL_NODES=$NUM_CRITICAL_NODES
         STOCHASTICITY=$STOCHASTICITY
         TRANSITION_NOISE=$TRANSITION_NOISE
+        INTERVENTION_EFFECT_SPAN=$INTERVENTION_EFFECT_SPAN
+        FAILURE_SOFTNESS=$FAILURE_SOFTNESS
+        RISK_THRESHOLD=$RISK_THRESHOLD
+        MIN_GAP_BETWEEN_INTERVENTIONS=$MIN_GAP_BETWEEN_INTERVENTIONS
         OUTPUT=roll_ablation_s${SEED}.jsonl
     )
     if [ -n "$REQUIRED_CRITICAL_PASSES" ]; then
@@ -120,6 +146,6 @@ python "$APP_DIR/experiments/aggregate_results.py" "$RESULTS_DIR" \
     --markdown "$RESULTS_DIR/summary.md"
 
 python "$APP_DIR/experiments/aggregate_results.py" "$RESULTS_DIR" \
-    --group-by experiment,mode,budget,kl_coeff,spend_mode,env \
+    --group-by experiment,mode,budget,kl_coeff,spend_mode,env,difficulty \
     --csv "$RESULTS_DIR/summary_seed_stats.csv" \
     --markdown "$RESULTS_DIR/summary_seed_stats.md"

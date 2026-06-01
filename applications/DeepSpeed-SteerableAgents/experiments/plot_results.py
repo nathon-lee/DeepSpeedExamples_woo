@@ -224,6 +224,9 @@ def main() -> None:
                    help="Filter rows by env value before plotting")
     p.add_argument("--spend-mode", default="adaptive",
                    help="Filter rows by spend_mode before plotting")
+    p.add_argument("--difficulty", default="",
+                   help="Optional: filter rows by difficulty preset "
+                        "(easy|medium|hard) before plotting.")
     args = p.parse_args()
 
     if not os.path.isfile(args.csv):
@@ -232,6 +235,8 @@ def main() -> None:
     _ensure_matplotlib()
     os.makedirs(args.out_dir, exist_ok=True)
     rows = _read_csv(args.csv)
+    if args.difficulty:
+        rows = [r for r in rows if r.get("difficulty") == args.difficulty]
     print(f"[plot] loaded {len(rows)} rows from {args.csv}")
 
     plot_budget_sweep(rows, args.out_dir, args.env, args.spend_mode)

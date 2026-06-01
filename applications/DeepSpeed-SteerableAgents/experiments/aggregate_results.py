@@ -22,8 +22,8 @@ from typing import Any, Dict, List
 # `metrics` / `extra` is appended at the end so we never silently drop data.
 CORE_COLS = [
     "experiment", "run_id", "seed", "mode", "budget", "kl_coeff",
-    "spend_mode", "env", "horizon", "episode_steps", "num_actions",
-    "checkpoint", "git_commit", "wall_time_sec",
+    "spend_mode", "env", "difficulty", "horizon", "episode_steps",
+    "num_actions", "checkpoint", "git_commit", "wall_time_sec",
 ]
 METRIC_COLS = [
     "success_rate", "mean_reward", "mean_length", "num_eval_episodes",
@@ -141,6 +141,11 @@ def main() -> None:
         "--ceiling-threshold", type=float, default=0.98,
         help="Warn if all success_rate values are >= this threshold.",
     )
+    p.add_argument(
+        "--floor-threshold", type=float, default=0.02,
+        help="Warn if all budgeted (B>=1) success_rate values are <= this "
+             "threshold (env too hard / steering too weak).",
+    )
     args = p.parse_args()
 
     paths: List[str] = []
@@ -162,6 +167,21 @@ def main() -> None:
             "[aggregate][WARN] potential ceiling effect: all success_rate "
             f"values >= {args.ceiling_threshold:.3f}. Tune env difficulty "
             "(num_critical_nodes, stochasticity, transition_noise, required_critical_passes).",
+            file=sys.stderr,
+        )
+
+    budgeted_succ = [
+        r.get("success_rate") for r in rows
+        if isinstance(r.get("success_rate"), (int, float))
+        and isinstance(r.get("budget"), (int, float)) and r.get("budget", 0) >= 1
+    ]
+    if budgeted_succ and max(budgeted_succ) <= args.floor_threshold:
+        print(
+            "[aggregate][WARN] potential floor effect: all budgeted (B>=1) "
+            f"success_rate values <= {args.floor_threshold:.3f}. Env may be too "
+            "hard or steering too weak. Try an easier difficulty preset, lower "
+            "required_critical_passes / failure_softness, or a larger "
+            "intervention_effect_span.",
             file=sys.stderr,
         )
 

@@ -37,6 +37,7 @@ class ResultRow:
     kl_coeff: float = 0.0
     spend_mode: str = "forced"
     env: str = "v2"
+    difficulty: str = ""
     horizon: int = 0
     episode_steps: int = 0
     num_actions: int = 0
@@ -80,6 +81,7 @@ def build_row(
     kl_coeff: float,
     spend_mode: str,
     env: str,
+    difficulty: str,
     horizon: int,
     episode_steps: int,
     num_actions: int,
@@ -134,6 +136,7 @@ def build_row(
         kl_coeff=kl_coeff,
         spend_mode=spend_mode,
         env=env,
+        difficulty=difficulty,
         horizon=horizon,
         episode_steps=episode_steps,
         num_actions=num_actions,
@@ -174,6 +177,7 @@ def _parse_args() -> argparse.Namespace:
     p.add_argument("--kl-coeff", type=float, default=0.0)
     p.add_argument("--spend-mode", choices=["forced", "adaptive"], default="forced")
     p.add_argument("--env", default="v2")
+    p.add_argument("--difficulty", default="")
     p.add_argument("--horizon", type=int, default=8)
     p.add_argument("--episode-steps", type=int, default=24)
     p.add_argument("--num-actions", type=int, default=4)
@@ -205,6 +209,7 @@ if __name__ == "__main__":
         kl_coeff=args.kl_coeff,
         spend_mode=args.spend_mode,
         env=args.env,
+        difficulty=args.difficulty,
         horizon=args.horizon,
         episode_steps=args.episode_steps,
         num_actions=args.num_actions,

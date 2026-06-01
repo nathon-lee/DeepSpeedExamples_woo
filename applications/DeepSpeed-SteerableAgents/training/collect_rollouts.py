@@ -53,10 +53,15 @@ def collect(
     env_name: str = "v1",
     episode_steps: Optional[int] = None,
     spend_mode: str = "adaptive",
-    num_critical_nodes: int = 4,
-    stochasticity: float = 0.25,
-    transition_noise: float = 0.10,
+    num_critical_nodes: Optional[int] = None,
+    stochasticity: Optional[float] = None,
+    transition_noise: Optional[float] = None,
     required_critical_passes: Optional[int] = None,
+    difficulty: Optional[str] = None,
+    intervention_effect_span: Optional[int] = None,
+    failure_softness: Optional[str] = None,
+    risk_threshold: float = 0.0,
+    min_gap_between_interventions: int = 0,
     student: Optional[MLPPolicy] = None,
 ) -> List[Trajectory]:
     torch.manual_seed(seed)
@@ -65,9 +70,20 @@ def collect(
     if env_name in {"v2", "v3"} and episode_steps is not None:
         env_kwargs["episode_steps"] = int(episode_steps)
     if env_name == "v3":
-        env_kwargs["num_critical_nodes"] = int(num_critical_nodes)
-        env_kwargs["stochasticity"] = float(stochasticity)
-        env_kwargs["transition_noise"] = float(transition_noise)
+        # Only forward explicitly-set knobs so a named difficulty preset can
+        # supply the rest (explicit kwargs override the preset).
+        if difficulty is not None:
+            env_kwargs["difficulty"] = str(difficulty)
+        if num_critical_nodes is not None:
+            env_kwargs["num_critical_nodes"] = int(num_critical_nodes)
+        if stochasticity is not None:
+            env_kwargs["stochasticity"] = float(stochasticity)
+        if transition_noise is not None:
+            env_kwargs["transition_noise"] = float(transition_noise)
+        if intervention_effect_span is not None:
+            env_kwargs["intervention_effect_span"] = int(intervention_effect_span)
+        if failure_softness is not None:
+            env_kwargs["failure_softness"] = str(failure_softness)
         if required_critical_passes is not None:
             env_kwargs["required_critical_passes"] = int(required_critical_passes)
     env = make_env(
@@ -91,6 +107,8 @@ def collect(
         per_episode_budget=per_episode_budget,
         threshold=threshold,
         spend_mode=spend_mode,
+        risk_threshold=risk_threshold,
+        min_gap_between_interventions=min_gap_between_interventions,
     )
 
     trajectories: List[Trajectory] = []
@@ -125,11 +143,13 @@ def collect(
             executed_action = action
             iv: InterventionEvent | None = None
             is_critical = bool(probe_info.get("is_critical_node", False))
+            risk = float(probe_info.get("risk", 0.0))
             if budget.should_intervene(
                 entropy,
                 step,
                 max_steps,
                 is_critical_node=is_critical,
+                risk=risk,
             ):
                 iv = teacher.query(
                     step=step,
@@ -151,15 +171,17 @@ def collect(
                         teacher_id="oracle",
                     )
                 if iv is not None:
-                    budget.record_intervention(cost=1)
+                    budget.record_intervention(cost=1, step=step)
                     if iv.kind == "action_veto":
                         executed_action = int(
                             iv.payload.get("replacement_action", action)
                         )
+                        env.notify_intervention(step)
                     elif iv.kind == "plan_correction":
                         executed_action = int(
                             iv.payload.get("first_action", action)
                         )
+                        env.notify_intervention(step)
                     # progress_update / goal_redirect / request_help do not
                     # mutate the executed action by default.
 
@@ -194,7 +216,13 @@ def collect(
         traj.info["interventions_used"] = int(len(traj.interventions))
         traj.info["spend_mode"] = str(spend_mode)
         if env_name == "v3":
-            traj.info["num_critical_nodes"] = int(num_critical_nodes)
+            traj.info["num_critical_nodes"] = int(
+                getattr(env, "num_critical_nodes", 0)
+            )
+            traj.info["required_critical_passes"] = int(
+                getattr(env, "required_critical_passes", 0)
+            )
+            traj.info["difficulty"] = str(getattr(env, "difficulty", "") or "custom")
         trajectories.append(traj)
 
     os.makedirs(os.path.dirname(os.path.abspath(output_path)) or ".", exist_ok=True)
@@ -235,10 +263,36 @@ def _parse_args() -> argparse.Namespace:
         choices=["forced", "adaptive"],
         help="forced: always spend when budget remains; adaptive: spend only when triggered.",
     )
-    p.add_argument("--num-critical-nodes", type=int, default=4)
-    p.add_argument("--stochasticity", type=float, default=0.25)
-    p.add_argument("--transition-noise", type=float, default=0.10)
+    p.add_argument("--num-critical-nodes", type=int, default=None)
+    p.add_argument("--stochasticity", type=float, default=None)
+    p.add_argument("--transition-noise", type=float, default=None)
     p.add_argument("--required-critical-passes", type=int, default=None)
+    p.add_argument(
+        "--difficulty",
+        type=str,
+        default=None,
+        choices=["easy", "medium", "hard"],
+        help="V3 only: named difficulty preset; explicit knobs override it.",
+    )
+    p.add_argument("--intervention-effect-span", type=int, default=None)
+    p.add_argument(
+        "--failure-softness",
+        type=str,
+        default=None,
+        choices=["high", "medium", "low"],
+    )
+    p.add_argument(
+        "--risk-threshold",
+        type=float,
+        default=0.0,
+        help="Adaptive only: gate interventions on uncertainty/risk >= this.",
+    )
+    p.add_argument(
+        "--min-gap-between-interventions",
+        type=int,
+        default=0,
+        help="Adaptive only: minimum steps between two interventions.",
+    )
     return p.parse_args()
 
 
@@ -261,4 +315,9 @@ if __name__ == "__main__":
         stochasticity=args.stochasticity,
         transition_noise=args.transition_noise,
         required_critical_passes=args.required_critical_passes,
+        difficulty=args.difficulty,
+        intervention_effect_span=args.intervention_effect_span,
+        failure_softness=args.failure_softness,
+        risk_threshold=args.risk_threshold,
+        min_gap_between_interventions=args.min_gap_between_interventions,
     )

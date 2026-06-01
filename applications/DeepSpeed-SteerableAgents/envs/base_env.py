@@ -36,6 +36,15 @@ class BaseEnv(ABC):
         """
         return {}
 
+    def notify_intervention(self, step: int | None = None) -> None:
+        """Hook called by the collector right before a *steered* action runs.
+
+        Envs that model a local intervention effect (e.g. suppressing
+        transition noise on the steered step) may override this. The default
+        is a no-op, preserving behaviour for v1/v2.
+        """
+        return None
+
     @abstractmethod
     def render(self) -> str:
         """Return a short string representation (debug only)."""

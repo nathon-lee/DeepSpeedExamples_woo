@@ -1,9 +1,13 @@
 """Harder long-horizon toy env (V3) with multiple critical decision nodes.
 
 Design goals:
-- A single intervention can only fix one critical node.
-- Success depends on multiple independently challenging decisions.
-- Difficulty is tunable via knobs (critical-node count, stochasticity, etc.).
+- Multiple independently challenging critical decisions.
+- Success is *soft*: missing a critical node penalizes but does not always
+  doom the trajectory (see ``failure_softness`` / ``required_critical_passes``).
+- A single intervention fixes the current critical node locally, and (via
+  ``intervention_effect_span``) may grant a short local follow-up advantage,
+  but never globally solves the task.
+- Difficulty is tunable via knobs and named presets (easy / medium / hard).
 
 Observation layout (length ``obs_dim``)::
 
@@ -20,37 +24,115 @@ oracle/trap only through ``get_probe_info()``.
 """
 from __future__ import annotations
 
+import math
 import random
 from typing import Any, Dict, List, Optional, Tuple
 
 from .base_env import BaseEnv
 
 
+# Named difficulty presets. Explicit kwargs always override preset values.
+DIFFICULTY_PRESETS: Dict[str, Dict[str, Any]] = {
+    "easy": dict(
+        num_critical_nodes=2,
+        horizon=16,
+        stochasticity=0.05,
+        transition_noise=0.05,
+        intervention_effect_span=2,
+        failure_softness="high",
+    ),
+    "medium": dict(
+        num_critical_nodes=3,
+        horizon=24,
+        stochasticity=0.10,
+        transition_noise=0.08,
+        intervention_effect_span=1,
+        failure_softness="medium",
+    ),
+    "hard": dict(
+        num_critical_nodes=5,
+        horizon=32,
+        stochasticity=0.15,
+        transition_noise=0.10,
+        intervention_effect_span=1,
+        failure_softness="low",
+    ),
+}
+
+# failure_softness -> fraction of critical nodes that must be passed to succeed.
+_SOFTNESS_REQUIRED_FRACTION = {
+    "high": 0.5,
+    "medium": 0.6,
+    "low": 0.8,
+}
+
+
+def resolve_difficulty(difficulty: Optional[str]) -> Dict[str, Any]:
+    """Return the preset kwargs for a named difficulty, or {} when unset."""
+    if not difficulty:
+        return {}
+    key = str(difficulty).lower()
+    if key not in DIFFICULTY_PRESETS:
+        raise ValueError(
+            f"Unknown difficulty {difficulty!r}; "
+            f"expected one of {sorted(DIFFICULTY_PRESETS)}"
+        )
+    return dict(DIFFICULTY_PRESETS[key])
+
+
 class ToyLongHorizonEnvV3(BaseEnv):
-    """Harder multi-critical-node long-horizon environment."""
+    """Mid-difficulty multi-critical-node long-horizon environment."""
 
     def __init__(
         self,
         num_actions: int = 4,
-        horizon: int = 40,
+        horizon: int = 24,
         seed: Optional[int] = None,
         episode_steps: Optional[int] = None,
-        num_critical_nodes: int = 4,
+        num_critical_nodes: Optional[int] = None,
         required_critical_passes: Optional[int] = None,
-        stochasticity: float = 0.25,
-        transition_noise: float = 0.10,
+        stochasticity: Optional[float] = None,
+        transition_noise: Optional[float] = None,
+        difficulty: Optional[str] = None,
+        intervention_effect_span: Optional[int] = None,
+        failure_softness: Optional[str] = None,
     ) -> None:
+        preset = resolve_difficulty(difficulty)
+
+        def pick(name: str, explicit, default):
+            if explicit is not None:
+                return explicit
+            if name in preset:
+                return preset[name]
+            return default
+
+        self.difficulty = (difficulty or "").lower()
         self.num_actions = int(num_actions)
-        self.horizon = int(horizon)
+        # ``horizon`` has a non-None default, so only honour the preset when the
+        # caller left it at the documented default and selected a difficulty.
+        if difficulty and horizon == 24:
+            self.horizon = int(preset.get("horizon", horizon))
+        else:
+            self.horizon = int(horizon)
+        self.num_critical_nodes = max(1, int(pick("num_critical_nodes", num_critical_nodes, 3)))
+        self.stochasticity = float(max(0.0, min(1.0, pick("stochasticity", stochasticity, 0.10))))
+        self.transition_noise = float(max(0.0, min(1.0, pick("transition_noise", transition_noise, 0.08))))
+        self.intervention_effect_span = max(1, int(pick("intervention_effect_span", intervention_effect_span, 1)))
+        self.failure_softness = str(pick("failure_softness", failure_softness, "medium")).lower()
+
         self.episode_steps = int(episode_steps if episode_steps is not None else self.horizon)
-        self.num_critical_nodes = max(1, int(num_critical_nodes))
-        self.required_critical_passes = int(
-            required_critical_passes
-            if required_critical_passes is not None
-            else self.num_critical_nodes
+
+        # Soft-failure: required passes default derives from failure_softness.
+        if required_critical_passes is not None:
+            self.required_critical_passes = int(required_critical_passes)
+        else:
+            frac = _SOFTNESS_REQUIRED_FRACTION.get(self.failure_softness, 0.6)
+            self.required_critical_passes = max(
+                1, int(math.ceil(frac * self.num_critical_nodes))
+            )
+        self.required_critical_passes = min(
+            self.required_critical_passes, self.num_critical_nodes
         )
-        self.stochasticity = float(max(0.0, min(1.0, stochasticity)))
-        self.transition_noise = float(max(0.0, min(1.0, transition_noise)))
 
         # obs = step + progress + one_hot(last) + one_hot(hint) + 2 scalar flags
         self.obs_dim = 2 + self.num_actions + self.num_actions + 2
@@ -65,6 +147,10 @@ class ToyLongHorizonEnvV3(BaseEnv):
         self._critical_steps: List[int] = []
         self._good_actions: List[int] = []
         self._trap_actions: List[int] = []
+
+        # Local intervention-effect bookkeeping.
+        self._intervention_pending = False
+        self._boost_remaining = 0
 
     # ------------------------------------------------------------------ utils
     def _build_episode_spec(self) -> None:
@@ -103,6 +189,9 @@ class ToyLongHorizonEnvV3(BaseEnv):
         if idx is None:
             return -1
         good = self._good_actions[idx]
+        # A local intervention boost makes the upcoming hint noise-free.
+        if self._boost_remaining > 0:
+            return good
         if self._rng.random() >= self.stochasticity:
             return good
         # Noisy hint: can be wrong.
@@ -139,14 +228,29 @@ class ToyLongHorizonEnvV3(BaseEnv):
         self._last_action = -1
         self._critical_passes = 0
         self._critical_seen = 0
+        self._intervention_pending = False
+        self._boost_remaining = 0
         self._build_episode_spec()
         return self._obs()
+
+    def notify_intervention(self, step: Optional[int] = None) -> None:
+        """Mark that the *next* ``step`` was steered by a teacher intervention.
+
+        The collector calls this right before executing the (overridden)
+        action. It (a) suppresses transition noise so the steered action lands
+        reliably, and (b) seeds a local follow-up advantage of
+        ``intervention_effect_span - 1`` subsequent critical nodes.
+        """
+        self._intervention_pending = True
 
     def step(self, action: int) -> Tuple[List[float], float, bool, Dict[str, Any]]:
         if self._done:
             raise RuntimeError("Cannot step a finished episode; call reset().")
         if not (0 <= action < self.num_actions):
             raise ValueError(f"action {action} out of range")
+
+        intervened = self._intervention_pending
+        self._intervention_pending = False
 
         reward = 0.0
         idx = self._critical_index_at_step(self._step)
@@ -156,17 +260,35 @@ class ToyLongHorizonEnvV3(BaseEnv):
         is_trap = False
 
         effective_action = int(action)
-        if is_critical and self.transition_noise > 0 and self._rng.random() < self.transition_noise:
+        # Transition noise is suppressed on steered steps and during a boost.
+        noise_active = (
+            is_critical
+            and self.transition_noise > 0
+            and not intervened
+            and self._boost_remaining <= 0
+        )
+        if noise_active and self._rng.random() < self.transition_noise:
             effective_action = self._rng.randrange(self.num_actions)
 
         if is_critical:
             oracle_action = int(self._good_actions[idx])
             trap_action = int(self._trap_actions[idx])
             self._critical_seen += 1
+
+            if intervened:
+                # A local intervention seeds a short follow-up advantage.
+                self._boost_remaining = max(
+                    self._boost_remaining, self.intervention_effect_span - 1
+                )
+            elif self._boost_remaining > 0:
+                # Consume one unit of the local follow-up advantage.
+                self._boost_remaining -= 1
+
             if effective_action == oracle_action:
                 self._critical_passes += 1
                 reward += 1.0
             else:
+                # Soft penalty: missing a node hurts but does not end the run.
                 reward -= 0.1
                 if effective_action == trap_action:
                     reward -= 0.4
@@ -191,6 +313,7 @@ class ToyLongHorizonEnvV3(BaseEnv):
             "critical_passes": int(self._critical_passes),
             "critical_seen": int(self._critical_seen),
             "num_critical_nodes": int(self.num_critical_nodes),
+            "required_critical_passes": int(self.required_critical_passes),
             "success": success,
         }
         return self._obs(), reward, self._done, info
@@ -200,21 +323,33 @@ class ToyLongHorizonEnvV3(BaseEnv):
         is_critical = idx is not None
         oracle = int(self._good_actions[idx]) if is_critical else None
         trap = int(self._trap_actions[idx]) if is_critical else None
+        remaining_required = max(
+            0, self.required_critical_passes - self._critical_passes
+        )
+        remaining_nodes = max(0, self.num_critical_nodes - self._critical_seen)
+        # Risk is high when we still *need* passes and few nodes remain.
+        risk = 0.0
+        if remaining_nodes > 0:
+            risk = min(1.0, remaining_required / max(1, remaining_nodes))
         return {
             "oracle_action": oracle,
             "trap_action": trap,
             "is_critical_node": bool(is_critical),
             "critical_node_index": int(idx) if idx is not None else None,
             "num_critical_nodes": int(self.num_critical_nodes),
+            "required_critical_passes": int(self.required_critical_passes),
             "critical_passes": int(self._critical_passes),
             "critical_seen": int(self._critical_seen),
-            "remaining_critical_nodes": int(max(0, self.num_critical_nodes - self._critical_seen)),
+            "remaining_critical_nodes": int(remaining_nodes),
+            "remaining_required_passes": int(remaining_required),
+            "risk": float(risk),
         }
 
     def render(self) -> str:
         return (
-            f"V3 step={self._step}/{self.episode_steps} "
+            f"V3[{self.difficulty or 'custom'}] step={self._step}/{self.episode_steps} "
             f"passes={self._critical_passes}/{self.required_critical_passes} "
             f"seen={self._critical_seen}/{self.num_critical_nodes} "
+            f"span={self.intervention_effect_span} boost={self._boost_remaining} "
             f"critical_steps={self._critical_steps} done={self._done}"
         )

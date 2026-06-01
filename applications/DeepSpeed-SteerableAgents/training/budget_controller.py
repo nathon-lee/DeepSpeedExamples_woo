@@ -15,9 +15,11 @@ class BudgetState:
     per_episode_budget: int
     global_used: int = 0
     episode_used: int = 0
+    last_intervention_step: int = -10_000
 
     def reset_episode(self) -> None:
         self.episode_used = 0
+        self.last_intervention_step = -10_000
 
     @property
     def global_remaining(self) -> int:
@@ -56,6 +58,8 @@ class BudgetController:
         w_horizon: float = 0.3,
         spend_mode: str = "forced",
         w_critical: float = 0.7,
+        risk_threshold: float = 0.0,
+        min_gap_between_interventions: int = 0,
     ) -> None:
         self.state = BudgetState(
             global_budget=int(global_budget),
@@ -65,6 +69,8 @@ class BudgetController:
         self.w_uncertainty = float(w_uncertainty)
         self.w_horizon = float(w_horizon)
         self.w_critical = float(w_critical)
+        self.risk_threshold = float(risk_threshold)
+        self.min_gap_between_interventions = int(min_gap_between_interventions)
         sm = (spend_mode or "forced").lower()
         if sm not in {"forced", "adaptive"}:
             raise ValueError("spend_mode must be 'forced' or 'adaptive'")
@@ -76,6 +82,7 @@ class BudgetController:
         step: int,
         horizon: int,
         is_critical_node: bool = False,
+        risk: float = 0.0,
     ) -> float:
         horizon_pressure = step / max(1, horizon)
         critical_bonus = self.w_critical if is_critical_node else 0.0
@@ -83,6 +90,7 @@ class BudgetController:
             self.w_uncertainty * float(uncertainty)
             + self.w_horizon * horizon_pressure
             + critical_bonus
+            + self.w_critical * float(risk) * (1.0 if is_critical_node else 0.0)
         )
 
     def should_intervene(
@@ -91,17 +99,35 @@ class BudgetController:
         step: int,
         horizon: int,
         is_critical_node: bool = False,
+        risk: float = 0.0,
     ) -> bool:
         if not self.state.can_spend():
             return False
         if self.spend_mode == "forced":
             return True
+        # Adaptive: spend the limited budget where it matters most.
+        if self.min_gap_between_interventions > 0:
+            gap = step - self.state.last_intervention_step
+            if gap < self.min_gap_between_interventions:
+                return False
+        # Gate on risk/criticality first to avoid wasting budget on calm states.
+        risky = is_critical_node or (uncertainty >= self.risk_threshold > 0.0) or (
+            risk >= self.risk_threshold > 0.0
+        )
+        if self.risk_threshold > 0.0 and not risky:
+            return False
         return (
             self.score(
-                uncertainty, step, horizon, is_critical_node=is_critical_node
+                uncertainty,
+                step,
+                horizon,
+                is_critical_node=is_critical_node,
+                risk=risk,
             )
             >= self.threshold
         )
 
-    def record_intervention(self, cost: int = 1) -> None:
+    def record_intervention(self, cost: int = 1, step: int | None = None) -> None:
         self.state.spend(cost)
+        if step is not None:
+            self.state.last_intervention_step = int(step)

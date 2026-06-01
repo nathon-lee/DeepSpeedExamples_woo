@@ -237,9 +237,9 @@ def train_rounds(
     per_episode_budget: int,
     threshold: float,
     spend_mode: str,
-    num_critical_nodes: int,
-    stochasticity: float,
-    transition_noise: float,
+    num_critical_nodes: Optional[int],
+    stochasticity: Optional[float],
+    transition_noise: Optional[float],
     required_critical_passes: Optional[int],
     ds_config: str,
     batch_size: int,
@@ -251,6 +251,11 @@ def train_rounds(
     log_every: int = 50,
     seed_rollouts_path: str = "",
     kl_coeff: float = 0.0,
+    difficulty: Optional[str] = None,
+    intervention_effect_span: Optional[int] = None,
+    failure_softness: Optional[str] = None,
+    risk_threshold: float = 0.0,
+    min_gap_between_interventions: int = 0,
 ) -> None:
     """Streaming / online path: alternate collect -> extend -> train K steps."""
     torch.manual_seed(seed)
@@ -260,9 +265,18 @@ def train_rounds(
     if env_name in {"v2", "v3"} and episode_steps is not None:
         env_kwargs["episode_steps"] = int(episode_steps)
     if env_name == "v3":
-        env_kwargs["num_critical_nodes"] = int(num_critical_nodes)
-        env_kwargs["stochasticity"] = float(stochasticity)
-        env_kwargs["transition_noise"] = float(transition_noise)
+        if difficulty is not None:
+            env_kwargs["difficulty"] = str(difficulty)
+        if num_critical_nodes is not None:
+            env_kwargs["num_critical_nodes"] = int(num_critical_nodes)
+        if stochasticity is not None:
+            env_kwargs["stochasticity"] = float(stochasticity)
+        if transition_noise is not None:
+            env_kwargs["transition_noise"] = float(transition_noise)
+        if intervention_effect_span is not None:
+            env_kwargs["intervention_effect_span"] = int(intervention_effect_span)
+        if failure_softness is not None:
+            env_kwargs["failure_softness"] = str(failure_softness)
         if required_critical_passes is not None:
             env_kwargs["required_critical_passes"] = int(required_critical_passes)
     probe_env = make_env(
@@ -317,6 +331,11 @@ def train_rounds(
             stochasticity=stochasticity,
             transition_noise=transition_noise,
             required_critical_passes=required_critical_passes,
+            difficulty=difficulty,
+            intervention_effect_span=intervention_effect_span,
+            failure_softness=failure_softness,
+            risk_threshold=risk_threshold,
+            min_gap_between_interventions=min_gap_between_interventions,
             student=student,
         )
 
@@ -396,10 +415,28 @@ def _parse_args() -> argparse.Namespace:
         choices=["forced", "adaptive"],
         help="Intervention spend policy for rounds-mode collection.",
     )
-    p.add_argument("--num-critical-nodes", type=int, default=4)
-    p.add_argument("--stochasticity", type=float, default=0.25)
-    p.add_argument("--transition-noise", type=float, default=0.10)
+    p.add_argument("--num-critical-nodes", type=int, default=None)
+    p.add_argument("--stochasticity", type=float, default=None)
+    p.add_argument("--transition-noise", type=float, default=None)
     p.add_argument("--required-critical-passes", type=int, default=None)
+    p.add_argument(
+        "--difficulty", type=str, default=None,
+        choices=["easy", "medium", "hard"],
+        help="V3 only: named difficulty preset; explicit knobs override it.",
+    )
+    p.add_argument("--intervention-effect-span", type=int, default=None)
+    p.add_argument(
+        "--failure-softness", type=str, default=None,
+        choices=["high", "medium", "low"],
+    )
+    p.add_argument(
+        "--risk-threshold", type=float, default=0.0,
+        help="Adaptive only: gate interventions on uncertainty/risk >= this.",
+    )
+    p.add_argument(
+        "--min-gap-between-interventions", type=int, default=0,
+        help="Adaptive only: minimum steps between two interventions.",
+    )
 
     # ---- Rounds / online mode -------------------------------------------
     p.add_argument(
@@ -444,9 +481,18 @@ if __name__ == "__main__":
     if args.env in {"v2", "v3"} and args.episode_steps is not None:
         probe_env_kwargs["episode_steps"] = args.episode_steps
     if args.env == "v3":
-        probe_env_kwargs["num_critical_nodes"] = args.num_critical_nodes
-        probe_env_kwargs["stochasticity"] = args.stochasticity
-        probe_env_kwargs["transition_noise"] = args.transition_noise
+        if args.difficulty is not None:
+            probe_env_kwargs["difficulty"] = args.difficulty
+        if args.num_critical_nodes is not None:
+            probe_env_kwargs["num_critical_nodes"] = args.num_critical_nodes
+        if args.stochasticity is not None:
+            probe_env_kwargs["stochasticity"] = args.stochasticity
+        if args.transition_noise is not None:
+            probe_env_kwargs["transition_noise"] = args.transition_noise
+        if args.intervention_effect_span is not None:
+            probe_env_kwargs["intervention_effect_span"] = args.intervention_effect_span
+        if args.failure_softness is not None:
+            probe_env_kwargs["failure_softness"] = args.failure_softness
         if args.required_critical_passes is not None:
             probe_env_kwargs["required_critical_passes"] = args.required_critical_passes
     probe_env = make_env(
@@ -484,6 +530,11 @@ if __name__ == "__main__":
             checkpoint_path=args.checkpoint_path,
             seed_rollouts_path=args.seed_rollouts,
             kl_coeff=args.kl_coeff,
+            difficulty=args.difficulty,
+            intervention_effect_span=args.intervention_effect_span,
+            failure_softness=args.failure_softness,
+            risk_threshold=args.risk_threshold,
+            min_gap_between_interventions=args.min_gap_between_interventions,
         )
     else:
         train(

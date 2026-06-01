@@ -9,13 +9,25 @@ APP_DIR="$(dirname "$HERE")"
 
 ENV="${ENV:-v3}"
 SPEND_MODE="${SPEND_MODE:-adaptive}"
-HORIZON="${HORIZON:-40}"
-EPISODE_STEPS="${EPISODE_STEPS:-40}"
+DIFFICULTY="${DIFFICULTY:-medium}"
 NUM_ACTIONS="${NUM_ACTIONS:-4}"
-NUM_CRITICAL_NODES="${NUM_CRITICAL_NODES:-4}"
-STOCHASTICITY="${STOCHASTICITY:-0.25}"
-TRANSITION_NOISE="${TRANSITION_NOISE:-0.10}"
+NUM_CRITICAL_NODES="${NUM_CRITICAL_NODES:-}"
+STOCHASTICITY="${STOCHASTICITY:-}"
+TRANSITION_NOISE="${TRANSITION_NOISE:-}"
+INTERVENTION_EFFECT_SPAN="${INTERVENTION_EFFECT_SPAN:-}"
+FAILURE_SOFTNESS="${FAILURE_SOFTNESS:-}"
 REQUIRED_CRITICAL_PASSES="${REQUIRED_CRITICAL_PASSES:-}"
+RISK_THRESHOLD="${RISK_THRESHOLD:-}"
+MIN_GAP_BETWEEN_INTERVENTIONS="${MIN_GAP_BETWEEN_INTERVENTIONS:-}"
+
+if [ -n "$DIFFICULTY" ] && [ "$ENV" = "v3" ]; then
+    _preset_h="$(PYTHONPATH="$APP_DIR" python -c "from envs.toy_long_horizon_env_v3 import DIFFICULTY_PRESETS as P; print(P['$DIFFICULTY']['horizon'])")"
+    HORIZON="${HORIZON:-$_preset_h}"
+    EPISODE_STEPS="${EPISODE_STEPS:-$_preset_h}"
+else
+    HORIZON="${HORIZON:-40}"
+    EPISODE_STEPS="${EPISODE_STEPS:-40}"
+fi
 
 NUM_EPISODES="${NUM_EPISODES:-512}"
 NUM_STEPS="${NUM_STEPS:-2000}"
@@ -48,9 +60,14 @@ for SEED in $SEEDS; do
         NUM_ACTIONS=$NUM_ACTIONS NUM_EPISODES=$NUM_EPISODES
         GLOBAL_BUDGET=$((B * NUM_EPISODES)) PER_EP_BUDGET=$B
         THRESHOLD=$THRESHOLD SEED=$SEED SPEND_MODE=$SPEND_MODE
+        DIFFICULTY=$DIFFICULTY
         NUM_CRITICAL_NODES=$NUM_CRITICAL_NODES
         STOCHASTICITY=$STOCHASTICITY
         TRANSITION_NOISE=$TRANSITION_NOISE
+        INTERVENTION_EFFECT_SPAN=$INTERVENTION_EFFECT_SPAN
+        FAILURE_SOFTNESS=$FAILURE_SOFTNESS
+        RISK_THRESHOLD=$RISK_THRESHOLD
+        MIN_GAP_BETWEEN_INTERVENTIONS=$MIN_GAP_BETWEEN_INTERVENTIONS
         OUTPUT=roll_offline_s${SEED}.jsonl
     )
     if [ -n "$REQUIRED_CRITICAL_PASSES" ]; then
@@ -61,8 +78,13 @@ for SEED in $SEEDS; do
     ENV=$ENV HORIZON=$HORIZON EPISODE_STEPS=$EPISODE_STEPS \
         NUM_ACTIONS=$NUM_ACTIONS NUM_STEPS=$NUM_STEPS BATCH_SIZE=$BATCH_SIZE \
         SEED=$SEED KL_COEFF=$KL_COEFF SPEND_MODE=$SPEND_MODE \
+        DIFFICULTY=$DIFFICULTY \
         NUM_CRITICAL_NODES=$NUM_CRITICAL_NODES STOCHASTICITY=$STOCHASTICITY \
         TRANSITION_NOISE=$TRANSITION_NOISE \
+        INTERVENTION_EFFECT_SPAN=$INTERVENTION_EFFECT_SPAN \
+        FAILURE_SOFTNESS=$FAILURE_SOFTNESS \
+        RISK_THRESHOLD=$RISK_THRESHOLD \
+        MIN_GAP_BETWEEN_INTERVENTIONS=$MIN_GAP_BETWEEN_INTERVENTIONS \
         ${REQUIRED_CRITICAL_PASSES:+REQUIRED_CRITICAL_PASSES=$REQUIRED_CRITICAL_PASSES} \
         ROLLOUTS=roll_offline_s${SEED}.jsonl \
         CHECKPOINT=ckpt_offline_s${SEED}.pt \
@@ -71,9 +93,12 @@ for SEED in $SEEDS; do
     eval_offline=(
         ENV=$ENV HORIZON=$HORIZON EPISODE_STEPS=$EPISODE_STEPS
         NUM_ACTIONS=$NUM_ACTIONS NUM_EVAL_EPISODES=$NUM_EVAL_EPISODES
+        DIFFICULTY=$DIFFICULTY
         NUM_CRITICAL_NODES=$NUM_CRITICAL_NODES
         STOCHASTICITY=$STOCHASTICITY
         TRANSITION_NOISE=$TRANSITION_NOISE
+        INTERVENTION_EFFECT_SPAN=$INTERVENTION_EFFECT_SPAN
+        FAILURE_SOFTNESS=$FAILURE_SOFTNESS
         EVAL_SEED=$((SEED + 1000))
         ROLLOUTS=roll_offline_s${SEED}.jsonl
         CHECKPOINT=ckpt_offline_s${SEED}.pt
@@ -94,6 +119,7 @@ for SEED in $SEEDS; do
         --kl-coeff "$KL_COEFF" \
         --spend-mode "$SPEND_MODE" \
         --env "$ENV" \
+        --difficulty "$DIFFICULTY" \
         --horizon "$HORIZON" \
         --episode-steps "$EPISODE_STEPS" \
         --num-actions "$NUM_ACTIONS" \
@@ -102,15 +128,20 @@ for SEED in $SEEDS; do
         --eval-budget "$(pwd)/offline_s${SEED}_eval_budget.json" \
         --eval-steerability "$(pwd)/offline_s${SEED}_eval_steerability.json" \
         --wall-time-sec "$t_offline" \
-        --extra-json "{\"total_train_steps\":$NUM_STEPS,\"num_critical_nodes\":$NUM_CRITICAL_NODES,\"stochasticity\":$STOCHASTICITY,\"transition_noise\":$TRANSITION_NOISE}" \
+        --extra-json "{\"total_train_steps\":$NUM_STEPS,\"difficulty\":\"$DIFFICULTY\"}" \
         --out "../../$RESULTS_DIR/offline_s${SEED}.json"
 
     # ----------------------------- rounds arm ------------------------------
     t_start=$(date +%s)
     ENV=$ENV HORIZON=$HORIZON EPISODE_STEPS=$EPISODE_STEPS \
         NUM_ACTIONS=$NUM_ACTIONS SPEND_MODE=$SPEND_MODE \
+        DIFFICULTY=$DIFFICULTY \
         NUM_CRITICAL_NODES=$NUM_CRITICAL_NODES STOCHASTICITY=$STOCHASTICITY \
         TRANSITION_NOISE=$TRANSITION_NOISE \
+        INTERVENTION_EFFECT_SPAN=$INTERVENTION_EFFECT_SPAN \
+        FAILURE_SOFTNESS=$FAILURE_SOFTNESS \
+        RISK_THRESHOLD=$RISK_THRESHOLD \
+        MIN_GAP_BETWEEN_INTERVENTIONS=$MIN_GAP_BETWEEN_INTERVENTIONS \
         ${REQUIRED_CRITICAL_PASSES:+REQUIRED_CRITICAL_PASSES=$REQUIRED_CRITICAL_PASSES} \
         ROUNDS=$ROUNDS EPISODES_PER_ROUND=$EPISODES_PER_ROUND \
         NUM_STEPS_PER_ROUND=$NUM_STEPS_PER_ROUND \
@@ -125,9 +156,14 @@ for SEED in $SEEDS; do
         NUM_ACTIONS=$NUM_ACTIONS NUM_EPISODES=$NUM_EPISODES
         GLOBAL_BUDGET=$((B * NUM_EPISODES)) PER_EP_BUDGET=$B
         THRESHOLD=$THRESHOLD SEED=$((SEED + 2000)) SPEND_MODE=$SPEND_MODE
+        DIFFICULTY=$DIFFICULTY
         NUM_CRITICAL_NODES=$NUM_CRITICAL_NODES
         STOCHASTICITY=$STOCHASTICITY
         TRANSITION_NOISE=$TRANSITION_NOISE
+        INTERVENTION_EFFECT_SPAN=$INTERVENTION_EFFECT_SPAN
+        FAILURE_SOFTNESS=$FAILURE_SOFTNESS
+        RISK_THRESHOLD=$RISK_THRESHOLD
+        MIN_GAP_BETWEEN_INTERVENTIONS=$MIN_GAP_BETWEEN_INTERVENTIONS
         CHECKPOINT=ckpt_rounds_s${SEED}.pt
         OUTPUT=roll_rounds_eval_s${SEED}.jsonl
     )
@@ -139,9 +175,12 @@ for SEED in $SEEDS; do
     eval_rounds=(
         ENV=$ENV HORIZON=$HORIZON EPISODE_STEPS=$EPISODE_STEPS
         NUM_ACTIONS=$NUM_ACTIONS NUM_EVAL_EPISODES=$NUM_EVAL_EPISODES
+        DIFFICULTY=$DIFFICULTY
         NUM_CRITICAL_NODES=$NUM_CRITICAL_NODES
         STOCHASTICITY=$STOCHASTICITY
         TRANSITION_NOISE=$TRANSITION_NOISE
+        INTERVENTION_EFFECT_SPAN=$INTERVENTION_EFFECT_SPAN
+        FAILURE_SOFTNESS=$FAILURE_SOFTNESS
         EVAL_SEED=$((SEED + 1000))
         ROLLOUTS=roll_rounds_eval_s${SEED}.jsonl
         CHECKPOINT=ckpt_rounds_s${SEED}.pt
@@ -162,6 +201,7 @@ for SEED in $SEEDS; do
         --kl-coeff "$KL_COEFF" \
         --spend-mode "$SPEND_MODE" \
         --env "$ENV" \
+        --difficulty "$DIFFICULTY" \
         --horizon "$HORIZON" \
         --episode-steps "$EPISODE_STEPS" \
         --num-actions "$NUM_ACTIONS" \
@@ -170,7 +210,7 @@ for SEED in $SEEDS; do
         --eval-budget "$(pwd)/rounds_s${SEED}_eval_budget.json" \
         --eval-steerability "$(pwd)/rounds_s${SEED}_eval_steerability.json" \
         --wall-time-sec "$t_rounds" \
-        --extra-json "{\"total_train_steps\":$((ROUNDS*NUM_STEPS_PER_ROUND)),\"rounds\":$ROUNDS,\"episodes_per_round\":$EPISODES_PER_ROUND,\"num_critical_nodes\":$NUM_CRITICAL_NODES,\"stochasticity\":$STOCHASTICITY,\"transition_noise\":$TRANSITION_NOISE}" \
+        --extra-json "{\"total_train_steps\":$((ROUNDS*NUM_STEPS_PER_ROUND)),\"rounds\":$ROUNDS,\"episodes_per_round\":$EPISODES_PER_ROUND,\"difficulty\":\"$DIFFICULTY\"}" \
         --out "../../$RESULTS_DIR/rounds_s${SEED}.json"
 done
 
@@ -180,6 +220,6 @@ python "$APP_DIR/experiments/aggregate_results.py" "$RESULTS_DIR" \
     --markdown "$RESULTS_DIR/summary.md"
 
 python "$APP_DIR/experiments/aggregate_results.py" "$RESULTS_DIR" \
-    --group-by experiment,mode,budget,kl_coeff,spend_mode,env \
+    --group-by experiment,mode,budget,kl_coeff,spend_mode,env,difficulty \
     --csv "$RESULTS_DIR/summary_seed_stats.csv" \
     --markdown "$RESULTS_DIR/summary_seed_stats.md"
