@@ -45,7 +45,9 @@ RESULTS_DIR="${RESULTS_DIR:-results/distill_ablation}"
 WORK_DIR="${WORK_DIR:-runs/distill_ablation}"
 
 mkdir -p "$RESULTS_DIR" "$WORK_DIR"
-cd "$WORK_DIR"
+RESULTS_DIR_ABS="$(cd "$RESULTS_DIR" && pwd)"
+WORK_DIR_ABS="$(cd "$WORK_DIR" && pwd)"
+cd "$WORK_DIR_ABS"
 
 run_one() {
     local seed="$1"
@@ -55,20 +57,25 @@ run_one() {
 
     local t_start; t_start=$(date +%s)
 
-    ENV=$ENV HORIZON=$HORIZON EPISODE_STEPS=$EPISODE_STEPS \
-        NUM_ACTIONS=$NUM_ACTIONS NUM_STEPS=$NUM_STEPS BATCH_SIZE=$BATCH_SIZE \
-        SEED=$seed KL_COEFF="$kl" SPEND_MODE=$SPEND_MODE \
-        DIFFICULTY=$DIFFICULTY \
-        NUM_CRITICAL_NODES=$NUM_CRITICAL_NODES STOCHASTICITY=$STOCHASTICITY \
-        TRANSITION_NOISE=$TRANSITION_NOISE \
-        INTERVENTION_EFFECT_SPAN=$INTERVENTION_EFFECT_SPAN \
-        FAILURE_SOFTNESS=$FAILURE_SOFTNESS \
-        RISK_THRESHOLD=$RISK_THRESHOLD \
-        MIN_GAP_BETWEEN_INTERVENTIONS=$MIN_GAP_BETWEEN_INTERVENTIONS \
-        ${REQUIRED_CRITICAL_PASSES:+REQUIRED_CRITICAL_PASSES=$REQUIRED_CRITICAL_PASSES} \
-        ROLLOUTS=roll_ablation_s${seed}.jsonl \
-        CHECKPOINT="$ckpt" \
-        bash "$APP_DIR/scripts/run_train.sh"
+    train_cmd=(
+        ENV=$ENV HORIZON=$HORIZON EPISODE_STEPS=$EPISODE_STEPS
+        NUM_ACTIONS=$NUM_ACTIONS NUM_STEPS=$NUM_STEPS BATCH_SIZE=$BATCH_SIZE
+        SEED=$seed KL_COEFF=$kl SPEND_MODE=$SPEND_MODE
+        DIFFICULTY=$DIFFICULTY
+        NUM_CRITICAL_NODES=$NUM_CRITICAL_NODES
+        STOCHASTICITY=$STOCHASTICITY
+        TRANSITION_NOISE=$TRANSITION_NOISE
+        INTERVENTION_EFFECT_SPAN=$INTERVENTION_EFFECT_SPAN
+        FAILURE_SOFTNESS=$FAILURE_SOFTNESS
+        RISK_THRESHOLD=$RISK_THRESHOLD
+        MIN_GAP_BETWEEN_INTERVENTIONS=$MIN_GAP_BETWEEN_INTERVENTIONS
+        ROLLOUTS=roll_ablation_s${seed}.jsonl
+        CHECKPOINT=$ckpt
+    )
+    if [ -n "$REQUIRED_CRITICAL_PASSES" ]; then
+        train_cmd+=(REQUIRED_CRITICAL_PASSES=$REQUIRED_CRITICAL_PASSES)
+    fi
+    env "${train_cmd[@]}" bash "$APP_DIR/scripts/run_train.sh"
 
     eval_cmd=(
         ENV=$ENV HORIZON=$HORIZON EPISODE_STEPS=$EPISODE_STEPS
@@ -110,7 +117,7 @@ run_one() {
         --eval-steerability "$(pwd)/${tag}_s${seed}_eval_steerability.json" \
         --wall-time-sec "$((t_end - t_start))" \
         --extra-json "{\"variant\":\"$tag\",\"difficulty\":\"$DIFFICULTY\"}" \
-        --out "../../$RESULTS_DIR/${tag}_s${seed}.json"
+        --out "$RESULTS_DIR_ABS/${tag}_s${seed}.json"
 }
 
 for SEED in $SEEDS; do
@@ -141,11 +148,11 @@ for SEED in $SEEDS; do
 done
 
 cd - > /dev/null
-python "$APP_DIR/experiments/aggregate_results.py" "$RESULTS_DIR" \
-    --csv "$RESULTS_DIR/summary.csv" \
-    --markdown "$RESULTS_DIR/summary.md"
+python "$APP_DIR/experiments/aggregate_results.py" "$RESULTS_DIR_ABS" \
+    --csv "$RESULTS_DIR_ABS/summary.csv" \
+    --markdown "$RESULTS_DIR_ABS/summary.md"
 
-python "$APP_DIR/experiments/aggregate_results.py" "$RESULTS_DIR" \
+python "$APP_DIR/experiments/aggregate_results.py" "$RESULTS_DIR_ABS" \
     --group-by experiment,mode,budget,kl_coeff,spend_mode,env,difficulty \
-    --csv "$RESULTS_DIR/summary_seed_stats.csv" \
-    --markdown "$RESULTS_DIR/summary_seed_stats.md"
+    --csv "$RESULTS_DIR_ABS/summary_seed_stats.csv" \
+    --markdown "$RESULTS_DIR_ABS/summary_seed_stats.md"

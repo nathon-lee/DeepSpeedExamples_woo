@@ -48,7 +48,9 @@ RESULTS_DIR="${RESULTS_DIR:-results/offline_vs_rounds}"
 WORK_DIR="${WORK_DIR:-runs/offline_vs_rounds}"
 
 mkdir -p "$RESULTS_DIR" "$WORK_DIR"
-cd "$WORK_DIR"
+RESULTS_DIR_ABS="$(cd "$RESULTS_DIR" && pwd)"
+WORK_DIR_ABS="$(cd "$WORK_DIR" && pwd)"
+cd "$WORK_DIR_ABS"
 
 for SEED in $SEEDS; do
     echo "=== offline_vs_rounds seed=$SEED spend_mode=$SPEND_MODE env=$ENV ==="
@@ -75,20 +77,24 @@ for SEED in $SEEDS; do
     fi
     env "${collect_offline[@]}" bash "$APP_DIR/scripts/run_collect.sh"
 
-    ENV=$ENV HORIZON=$HORIZON EPISODE_STEPS=$EPISODE_STEPS \
-        NUM_ACTIONS=$NUM_ACTIONS NUM_STEPS=$NUM_STEPS BATCH_SIZE=$BATCH_SIZE \
-        SEED=$SEED KL_COEFF=$KL_COEFF SPEND_MODE=$SPEND_MODE \
-        DIFFICULTY=$DIFFICULTY \
-        NUM_CRITICAL_NODES=$NUM_CRITICAL_NODES STOCHASTICITY=$STOCHASTICITY \
-        TRANSITION_NOISE=$TRANSITION_NOISE \
-        INTERVENTION_EFFECT_SPAN=$INTERVENTION_EFFECT_SPAN \
-        FAILURE_SOFTNESS=$FAILURE_SOFTNESS \
-        RISK_THRESHOLD=$RISK_THRESHOLD \
-        MIN_GAP_BETWEEN_INTERVENTIONS=$MIN_GAP_BETWEEN_INTERVENTIONS \
-        ${REQUIRED_CRITICAL_PASSES:+REQUIRED_CRITICAL_PASSES=$REQUIRED_CRITICAL_PASSES} \
-        ROLLOUTS=roll_offline_s${SEED}.jsonl \
-        CHECKPOINT=ckpt_offline_s${SEED}.pt \
-        bash "$APP_DIR/scripts/run_train.sh"
+    train_offline=(
+        ENV=$ENV HORIZON=$HORIZON EPISODE_STEPS=$EPISODE_STEPS
+        NUM_ACTIONS=$NUM_ACTIONS NUM_STEPS=$NUM_STEPS BATCH_SIZE=$BATCH_SIZE
+        SEED=$SEED KL_COEFF=$KL_COEFF SPEND_MODE=$SPEND_MODE
+        DIFFICULTY=$DIFFICULTY
+        NUM_CRITICAL_NODES=$NUM_CRITICAL_NODES STOCHASTICITY=$STOCHASTICITY
+        TRANSITION_NOISE=$TRANSITION_NOISE
+        INTERVENTION_EFFECT_SPAN=$INTERVENTION_EFFECT_SPAN
+        FAILURE_SOFTNESS=$FAILURE_SOFTNESS
+        RISK_THRESHOLD=$RISK_THRESHOLD
+        MIN_GAP_BETWEEN_INTERVENTIONS=$MIN_GAP_BETWEEN_INTERVENTIONS
+        ROLLOUTS=roll_offline_s${SEED}.jsonl
+        CHECKPOINT=ckpt_offline_s${SEED}.pt
+    )
+    if [ -n "$REQUIRED_CRITICAL_PASSES" ]; then
+        train_offline+=(REQUIRED_CRITICAL_PASSES=$REQUIRED_CRITICAL_PASSES)
+    fi
+    env "${train_offline[@]}" bash "$APP_DIR/scripts/run_train.sh"
 
     eval_offline=(
         ENV=$ENV HORIZON=$HORIZON EPISODE_STEPS=$EPISODE_STEPS
@@ -129,27 +135,31 @@ for SEED in $SEEDS; do
         --eval-steerability "$(pwd)/offline_s${SEED}_eval_steerability.json" \
         --wall-time-sec "$t_offline" \
         --extra-json "{\"total_train_steps\":$NUM_STEPS,\"difficulty\":\"$DIFFICULTY\"}" \
-        --out "../../$RESULTS_DIR/offline_s${SEED}.json"
+        --out "$RESULTS_DIR_ABS/offline_s${SEED}.json"
 
     # ----------------------------- rounds arm ------------------------------
     t_start=$(date +%s)
-    ENV=$ENV HORIZON=$HORIZON EPISODE_STEPS=$EPISODE_STEPS \
-        NUM_ACTIONS=$NUM_ACTIONS SPEND_MODE=$SPEND_MODE \
-        DIFFICULTY=$DIFFICULTY \
-        NUM_CRITICAL_NODES=$NUM_CRITICAL_NODES STOCHASTICITY=$STOCHASTICITY \
-        TRANSITION_NOISE=$TRANSITION_NOISE \
-        INTERVENTION_EFFECT_SPAN=$INTERVENTION_EFFECT_SPAN \
-        FAILURE_SOFTNESS=$FAILURE_SOFTNESS \
-        RISK_THRESHOLD=$RISK_THRESHOLD \
-        MIN_GAP_BETWEEN_INTERVENTIONS=$MIN_GAP_BETWEEN_INTERVENTIONS \
-        ${REQUIRED_CRITICAL_PASSES:+REQUIRED_CRITICAL_PASSES=$REQUIRED_CRITICAL_PASSES} \
-        ROUNDS=$ROUNDS EPISODES_PER_ROUND=$EPISODES_PER_ROUND \
-        NUM_STEPS_PER_ROUND=$NUM_STEPS_PER_ROUND \
-        GLOBAL_BUDGET_PER_ROUND=$GLOBAL_BUDGET_PER_ROUND \
-        PER_EP_BUDGET=$B THRESHOLD=$THRESHOLD \
-        BATCH_SIZE=$BATCH_SIZE SEED=$SEED KL_COEFF=$KL_COEFF \
-        CHECKPOINT=ckpt_rounds_s${SEED}.pt \
-        bash "$APP_DIR/scripts/run_train.sh"
+    train_rounds=(
+        ENV=$ENV HORIZON=$HORIZON EPISODE_STEPS=$EPISODE_STEPS
+        NUM_ACTIONS=$NUM_ACTIONS SPEND_MODE=$SPEND_MODE
+        DIFFICULTY=$DIFFICULTY
+        NUM_CRITICAL_NODES=$NUM_CRITICAL_NODES STOCHASTICITY=$STOCHASTICITY
+        TRANSITION_NOISE=$TRANSITION_NOISE
+        INTERVENTION_EFFECT_SPAN=$INTERVENTION_EFFECT_SPAN
+        FAILURE_SOFTNESS=$FAILURE_SOFTNESS
+        RISK_THRESHOLD=$RISK_THRESHOLD
+        MIN_GAP_BETWEEN_INTERVENTIONS=$MIN_GAP_BETWEEN_INTERVENTIONS
+        ROUNDS=$ROUNDS EPISODES_PER_ROUND=$EPISODES_PER_ROUND
+        NUM_STEPS_PER_ROUND=$NUM_STEPS_PER_ROUND
+        GLOBAL_BUDGET_PER_ROUND=$GLOBAL_BUDGET_PER_ROUND
+        PER_EP_BUDGET=$B THRESHOLD=$THRESHOLD
+        BATCH_SIZE=$BATCH_SIZE SEED=$SEED KL_COEFF=$KL_COEFF
+        CHECKPOINT=ckpt_rounds_s${SEED}.pt
+    )
+    if [ -n "$REQUIRED_CRITICAL_PASSES" ]; then
+        train_rounds+=(REQUIRED_CRITICAL_PASSES=$REQUIRED_CRITICAL_PASSES)
+    fi
+    env "${train_rounds[@]}" bash "$APP_DIR/scripts/run_train.sh"
 
     collect_rounds_eval=(
         ENV=$ENV HORIZON=$HORIZON EPISODE_STEPS=$EPISODE_STEPS
@@ -211,15 +221,15 @@ for SEED in $SEEDS; do
         --eval-steerability "$(pwd)/rounds_s${SEED}_eval_steerability.json" \
         --wall-time-sec "$t_rounds" \
         --extra-json "{\"total_train_steps\":$((ROUNDS*NUM_STEPS_PER_ROUND)),\"rounds\":$ROUNDS,\"episodes_per_round\":$EPISODES_PER_ROUND,\"difficulty\":\"$DIFFICULTY\"}" \
-        --out "../../$RESULTS_DIR/rounds_s${SEED}.json"
+        --out "$RESULTS_DIR_ABS/rounds_s${SEED}.json"
 done
 
 cd - > /dev/null
-python "$APP_DIR/experiments/aggregate_results.py" "$RESULTS_DIR" \
-    --csv "$RESULTS_DIR/summary.csv" \
-    --markdown "$RESULTS_DIR/summary.md"
+python "$APP_DIR/experiments/aggregate_results.py" "$RESULTS_DIR_ABS" \
+    --csv "$RESULTS_DIR_ABS/summary.csv" \
+    --markdown "$RESULTS_DIR_ABS/summary.md"
 
-python "$APP_DIR/experiments/aggregate_results.py" "$RESULTS_DIR" \
+python "$APP_DIR/experiments/aggregate_results.py" "$RESULTS_DIR_ABS" \
     --group-by experiment,mode,budget,kl_coeff,spend_mode,env,difficulty \
-    --csv "$RESULTS_DIR/summary_seed_stats.csv" \
-    --markdown "$RESULTS_DIR/summary_seed_stats.md"
+    --csv "$RESULTS_DIR_ABS/summary_seed_stats.csv" \
+    --markdown "$RESULTS_DIR_ABS/summary_seed_stats.md"

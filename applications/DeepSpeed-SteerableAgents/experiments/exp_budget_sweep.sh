@@ -48,7 +48,9 @@ RESULTS_DIR="${RESULTS_DIR:-results/budget_sweep}"
 WORK_DIR="${WORK_DIR:-runs/budget_sweep}"
 
 mkdir -p "$RESULTS_DIR" "$WORK_DIR"
-cd "$WORK_DIR"
+RESULTS_DIR_ABS="$(cd "$RESULTS_DIR" && pwd)"
+WORK_DIR_ABS="$(cd "$WORK_DIR" && pwd)"
+cd "$WORK_DIR_ABS"
 
 for SEED in $SEEDS; do
     baseline_succ=""
@@ -76,19 +78,24 @@ for SEED in $SEEDS; do
         fi
         env "${collect_cmd[@]}" bash "$APP_DIR/scripts/run_collect.sh"
 
-        ENV=$ENV HORIZON=$HORIZON EPISODE_STEPS=$EPISODE_STEPS \
-            NUM_ACTIONS=$NUM_ACTIONS NUM_STEPS=$NUM_STEPS BATCH_SIZE=$BATCH_SIZE \
-            SEED=$SEED KL_COEFF=$KL_COEFF SPEND_MODE=$SPEND_MODE \
-            DIFFICULTY=$DIFFICULTY \
-            NUM_CRITICAL_NODES=$NUM_CRITICAL_NODES \
-            STOCHASTICITY=$STOCHASTICITY TRANSITION_NOISE=$TRANSITION_NOISE \
-            INTERVENTION_EFFECT_SPAN=$INTERVENTION_EFFECT_SPAN \
-            FAILURE_SOFTNESS=$FAILURE_SOFTNESS \
-            RISK_THRESHOLD=$RISK_THRESHOLD \
-            MIN_GAP_BETWEEN_INTERVENTIONS=$MIN_GAP_BETWEEN_INTERVENTIONS \
-            ROLLOUTS=roll_b${B}_s${SEED}.jsonl \
-            CHECKPOINT=ckpt_b${B}_s${SEED}.pt \
-            bash "$APP_DIR/scripts/run_train.sh"
+        train_cmd=(
+            ENV=$ENV HORIZON=$HORIZON EPISODE_STEPS=$EPISODE_STEPS
+            NUM_ACTIONS=$NUM_ACTIONS NUM_STEPS=$NUM_STEPS BATCH_SIZE=$BATCH_SIZE
+            SEED=$SEED KL_COEFF=$KL_COEFF SPEND_MODE=$SPEND_MODE
+            DIFFICULTY=$DIFFICULTY
+            NUM_CRITICAL_NODES=$NUM_CRITICAL_NODES
+            STOCHASTICITY=$STOCHASTICITY TRANSITION_NOISE=$TRANSITION_NOISE
+            INTERVENTION_EFFECT_SPAN=$INTERVENTION_EFFECT_SPAN
+            FAILURE_SOFTNESS=$FAILURE_SOFTNESS
+            RISK_THRESHOLD=$RISK_THRESHOLD
+            MIN_GAP_BETWEEN_INTERVENTIONS=$MIN_GAP_BETWEEN_INTERVENTIONS
+            ROLLOUTS=roll_b${B}_s${SEED}.jsonl
+            CHECKPOINT=ckpt_b${B}_s${SEED}.pt
+        )
+        if [ -n "$REQUIRED_CRITICAL_PASSES" ]; then
+            train_cmd+=(REQUIRED_CRITICAL_PASSES=$REQUIRED_CRITICAL_PASSES)
+        fi
+        env "${train_cmd[@]}" bash "$APP_DIR/scripts/run_train.sh"
 
         eval_cmd=(
             ENV=$ENV HORIZON=$HORIZON EPISODE_STEPS=$EPISODE_STEPS
@@ -136,7 +143,7 @@ for SEED in $SEEDS; do
             --wall-time-sec "$((t_end - t_start))" \
             "${extra_args[@]}" \
             --extra-json "{\"difficulty\":\"$DIFFICULTY\"}" \
-            --out "../../$RESULTS_DIR/B${B}_s${SEED}.json"
+            --out "$RESULTS_DIR_ABS/B${B}_s${SEED}.json"
 
         if [ -z "$baseline_succ" ]; then
             baseline_succ=$(python -c "import json; print(json.load(open('b${B}_s${SEED}_eval_success.json'))['success_rate'])")
@@ -147,11 +154,11 @@ for SEED in $SEEDS; do
 done
 
 cd - > /dev/null
-python "$APP_DIR/experiments/aggregate_results.py" "$RESULTS_DIR" \
-    --csv "$RESULTS_DIR/summary.csv" \
-    --markdown "$RESULTS_DIR/summary.md"
+python "$APP_DIR/experiments/aggregate_results.py" "$RESULTS_DIR_ABS" \
+    --csv "$RESULTS_DIR_ABS/summary.csv" \
+    --markdown "$RESULTS_DIR_ABS/summary.md"
 
-python "$APP_DIR/experiments/aggregate_results.py" "$RESULTS_DIR" \
+python "$APP_DIR/experiments/aggregate_results.py" "$RESULTS_DIR_ABS" \
     --group-by experiment,mode,budget,kl_coeff,spend_mode,env,difficulty \
-    --csv "$RESULTS_DIR/summary_seed_stats.csv" \
-    --markdown "$RESULTS_DIR/summary_seed_stats.md"
+    --csv "$RESULTS_DIR_ABS/summary_seed_stats.csv" \
+    --markdown "$RESULTS_DIR_ABS/summary_seed_stats.md"
