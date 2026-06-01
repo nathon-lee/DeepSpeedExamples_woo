@@ -19,18 +19,32 @@ def evaluate(rollouts_path: str) -> dict:
     trajs = load_trajectories_jsonl(rollouts_path)
     iv_counts = [len(t.interventions) for t in trajs]
     costs = [sum(iv.cost for iv in t.interventions) for t in trajs]
+    cap_counts = [
+        float(t.info.get("per_episode_budget_cap", 0.0)) for t in trajs
+    ]
     kinds = Counter()
     for t in trajs:
         for iv in t.interventions:
             kinds[iv.kind] += 1
 
+    total_cap = sum(cap_counts)
+    total_interventions = sum(iv_counts)
+    utilization = (
+        total_interventions / total_cap if total_cap > 0 else None
+    )
+
     report = {
         "num_trajectories": len(trajs),
-        "total_interventions": sum(iv_counts),
+        "total_interventions": total_interventions,
         "total_cost": sum(costs),
+        "total_budget_cap": total_cap,
+        "interventions_used": total_interventions,
         "mean_interventions_per_traj": (
             sum(iv_counts) / max(1, len(trajs))
         ),
+        "mean_interventions_used": sum(iv_counts) / max(1, len(trajs)),
+        "mean_budget_cap_per_traj": sum(cap_counts) / max(1, len(cap_counts)),
+        "budget_utilization": utilization,
         "mean_cost_per_traj": sum(costs) / max(1, len(trajs)),
         "max_interventions_in_a_traj": max(iv_counts, default=0),
         "intervention_kind_counts": dict(kinds),

@@ -22,6 +22,10 @@ python "$APP_DIR/eval/eval_success.py" \
     --seed "${EVAL_SEED:-1234}" \
     --env "${ENV:-v1}" \
     ${EPISODE_STEPS:+--episode-steps "$EPISODE_STEPS"} \
+    --num-critical-nodes "${NUM_CRITICAL_NODES:-4}" \
+    --stochasticity "${STOCHASTICITY:-0.25}" \
+    --transition-noise "${TRANSITION_NOISE:-0.10}" \
+    ${REQUIRED_CRITICAL_PASSES:+--required-critical-passes "$REQUIRED_CRITICAL_PASSES"} \
     ${ALLOW_RANDOM_INIT:+--allow-random-init} \
     --output "${PREFIX}eval_success.json"
 

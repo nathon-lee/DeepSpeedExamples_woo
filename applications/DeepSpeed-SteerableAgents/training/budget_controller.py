@@ -54,6 +54,8 @@ class BudgetController:
         threshold: float = 0.6,
         w_uncertainty: float = 1.0,
         w_horizon: float = 0.3,
+        spend_mode: str = "forced",
+        w_critical: float = 0.7,
     ) -> None:
         self.state = BudgetState(
             global_budget=int(global_budget),
@@ -62,17 +64,44 @@ class BudgetController:
         self.threshold = float(threshold)
         self.w_uncertainty = float(w_uncertainty)
         self.w_horizon = float(w_horizon)
+        self.w_critical = float(w_critical)
+        sm = (spend_mode or "forced").lower()
+        if sm not in {"forced", "adaptive"}:
+            raise ValueError("spend_mode must be 'forced' or 'adaptive'")
+        self.spend_mode = sm
 
-    def score(self, uncertainty: float, step: int, horizon: int) -> float:
+    def score(
+        self,
+        uncertainty: float,
+        step: int,
+        horizon: int,
+        is_critical_node: bool = False,
+    ) -> float:
         horizon_pressure = step / max(1, horizon)
-        return self.w_uncertainty * float(uncertainty) + self.w_horizon * horizon_pressure
+        critical_bonus = self.w_critical if is_critical_node else 0.0
+        return (
+            self.w_uncertainty * float(uncertainty)
+            + self.w_horizon * horizon_pressure
+            + critical_bonus
+        )
 
     def should_intervene(
-        self, uncertainty: float, step: int, horizon: int
+        self,
+        uncertainty: float,
+        step: int,
+        horizon: int,
+        is_critical_node: bool = False,
     ) -> bool:
         if not self.state.can_spend():
             return False
-        return self.score(uncertainty, step, horizon) >= self.threshold
+        if self.spend_mode == "forced":
+            return True
+        return (
+            self.score(
+                uncertainty, step, horizon, is_critical_node=is_critical_node
+            )
+            >= self.threshold
+        )
 
     def record_intervention(self, cost: int = 1) -> None:
         self.state.spend(cost)

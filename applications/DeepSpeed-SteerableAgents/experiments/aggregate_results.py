@@ -22,12 +22,14 @@ from typing import Any, Dict, List
 # `metrics` / `extra` is appended at the end so we never silently drop data.
 CORE_COLS = [
     "experiment", "run_id", "seed", "mode", "budget", "kl_coeff",
-    "env", "horizon", "episode_steps", "num_actions", "checkpoint",
-    "git_commit", "wall_time_sec",
+    "spend_mode", "env", "horizon", "episode_steps", "num_actions",
+    "checkpoint", "git_commit", "wall_time_sec",
 ]
 METRIC_COLS = [
     "success_rate", "mean_reward", "mean_length", "num_eval_episodes",
-    "total_interventions", "mean_interventions_per_traj",
+    "total_interventions", "interventions_used",
+    "mean_interventions_per_traj", "mean_interventions_used",
+    "mean_budget_cap_per_traj", "budget_utilization",
     "avoided_bad_action_rate",
     "success_rate_with_intervention", "success_rate_without_intervention",
     "success_uplift_internal", "success_uplift_vs_baseline",
@@ -128,8 +130,16 @@ def main() -> None:
              "of the metric columns.",
     )
     p.add_argument(
-        "--group-metrics", default="success_rate,mean_interventions_per_traj",
+        "--group-metrics",
+        default=(
+            "success_rate,mean_interventions_used,"
+            "budget_utilization,cost_per_uplift_point"
+        ),
         help="Comma-separated metrics to aggregate when --group-by is set.",
+    )
+    p.add_argument(
+        "--ceiling-threshold", type=float, default=0.98,
+        help="Warn if all success_rate values are >= this threshold.",
     )
     args = p.parse_args()
 
@@ -145,6 +155,15 @@ def main() -> None:
     if not rows:
         print("[aggregate] no result rows found", file=sys.stderr)
         sys.exit(1)
+
+    succ_vals = [r.get("success_rate") for r in rows if isinstance(r.get("success_rate"), (int, float))]
+    if succ_vals and min(succ_vals) >= args.ceiling_threshold:
+        print(
+            "[aggregate][WARN] potential ceiling effect: all success_rate "
+            f"values >= {args.ceiling_threshold:.3f}. Tune env difficulty "
+            "(num_critical_nodes, stochasticity, transition_noise, required_critical_passes).",
+            file=sys.stderr,
+        )
 
     grouped_mode = bool(args.group_by)
     if grouped_mode:

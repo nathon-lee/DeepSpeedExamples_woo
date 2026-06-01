@@ -14,6 +14,7 @@ from typing import Any, Optional
 from .base_env import BaseEnv
 from .toy_long_horizon_env import ToyLongHorizonEnv
 from .toy_long_horizon_env_v2 import ToyLongHorizonEnvV2
+from .toy_long_horizon_env_v3 import ToyLongHorizonEnvV3
 
 
 def make_env(
@@ -32,4 +33,10 @@ def make_env(
         return ToyLongHorizonEnvV2(
             num_actions=num_actions, horizon=horizon, seed=seed, **kwargs
         )
-    raise ValueError(f"Unknown env name: {name!r} (expected 'v1' or 'v2')")
+    if name == "v3":
+        return ToyLongHorizonEnvV3(
+            num_actions=num_actions, horizon=horizon, seed=seed, **kwargs
+        )
+    raise ValueError(
+        f"Unknown env name: {name!r} (expected 'v1', 'v2', or 'v3')"
+    )

@@ -52,13 +52,24 @@ def collect(
     checkpoint: str = "",
     env_name: str = "v1",
     episode_steps: Optional[int] = None,
+    spend_mode: str = "adaptive",
+    num_critical_nodes: int = 4,
+    stochasticity: float = 0.25,
+    transition_noise: float = 0.10,
+    required_critical_passes: Optional[int] = None,
     student: Optional[MLPPolicy] = None,
 ) -> List[Trajectory]:
     torch.manual_seed(seed)
 
     env_kwargs: Dict[str, Any] = {}
-    if env_name == "v2" and episode_steps is not None:
+    if env_name in {"v2", "v3"} and episode_steps is not None:
         env_kwargs["episode_steps"] = int(episode_steps)
+    if env_name == "v3":
+        env_kwargs["num_critical_nodes"] = int(num_critical_nodes)
+        env_kwargs["stochasticity"] = float(stochasticity)
+        env_kwargs["transition_noise"] = float(transition_noise)
+        if required_critical_passes is not None:
+            env_kwargs["required_critical_passes"] = int(required_critical_passes)
     env = make_env(
         env_name, num_actions=num_actions, horizon=horizon, seed=seed,
         **env_kwargs,
@@ -79,6 +90,7 @@ def collect(
         global_budget=global_budget,
         per_episode_budget=per_episode_budget,
         threshold=threshold,
+        spend_mode=spend_mode,
     )
 
     trajectories: List[Trajectory] = []
@@ -112,13 +124,32 @@ def collect(
 
             executed_action = action
             iv: InterventionEvent | None = None
-            if budget.should_intervene(entropy, step, max_steps):
+            is_critical = bool(probe_info.get("is_critical_node", False))
+            if budget.should_intervene(
+                entropy,
+                step,
+                max_steps,
+                is_critical_node=is_critical,
+            ):
                 iv = teacher.query(
                     step=step,
                     proposed_action=action,
                     info=probe_info,
                     uncertainty=entropy,
                 )
+                if iv is None and budget.spend_mode == "forced":
+                    # Forced-spend compatibility path: if teacher declines,
+                    # still consume budget and leave the student action intact.
+                    iv = InterventionEvent(
+                        step=step,
+                        kind="progress_update",
+                        payload={
+                            "progress": float(probe_info.get("progress", 0.0)),
+                            "forced_spend": True,
+                        },
+                        cost=1.0,
+                        teacher_id="oracle",
+                    )
                 if iv is not None:
                     budget.record_intervention(cost=1)
                     if iv.kind == "action_veto":
@@ -159,6 +190,11 @@ def collect(
         traj.reward = total_reward
         traj.info["steps"] = step
         traj.info["global_budget_used"] = budget.state.global_used
+        traj.info["per_episode_budget_cap"] = int(per_episode_budget)
+        traj.info["interventions_used"] = int(len(traj.interventions))
+        traj.info["spend_mode"] = str(spend_mode)
+        if env_name == "v3":
+            traj.info["num_critical_nodes"] = int(num_critical_nodes)
         trajectories.append(traj)
 
     os.makedirs(os.path.dirname(os.path.abspath(output_path)) or ".", exist_ok=True)
@@ -184,14 +220,25 @@ def _parse_args() -> argparse.Namespace:
     p.add_argument("--seed", type=int, default=0)
     p.add_argument("--output", type=str, default="rollouts.jsonl")
     p.add_argument("--checkpoint", type=str, default="")
-    p.add_argument("--env", type=str, default="v1", choices=["v1", "v2"])
+    p.add_argument("--env", type=str, default="v1", choices=["v1", "v2", "v3"])
     p.add_argument(
         "--episode-steps",
         type=int,
         default=None,
-        help="V2 only: cap on episode length; defaults to --horizon. "
+        help="V2/V3 only: cap on episode length; defaults to --horizon. "
              "Set larger than --horizon for a smoother budget-vs-success curve.",
     )
+    p.add_argument(
+        "--spend-mode",
+        type=str,
+        default="adaptive",
+        choices=["forced", "adaptive"],
+        help="forced: always spend when budget remains; adaptive: spend only when triggered.",
+    )
+    p.add_argument("--num-critical-nodes", type=int, default=4)
+    p.add_argument("--stochasticity", type=float, default=0.25)
+    p.add_argument("--transition-noise", type=float, default=0.10)
+    p.add_argument("--required-critical-passes", type=int, default=None)
     return p.parse_args()
 
 
@@ -209,4 +256,9 @@ if __name__ == "__main__":
         checkpoint=args.checkpoint,
         env_name=args.env,
         episode_steps=args.episode_steps,
+        spend_mode=args.spend_mode,
+        num_critical_nodes=args.num_critical_nodes,
+        stochasticity=args.stochasticity,
+        transition_noise=args.transition_noise,
+        required_critical_passes=args.required_critical_passes,
     )

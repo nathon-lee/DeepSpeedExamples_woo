@@ -34,7 +34,8 @@ class ResultRow:
     seed: int = 0
     mode: str = "offline"          # "offline" | "rounds"
     budget: int = 0                # per-episode intervention budget at COLLECT
-    kl_coeff: float = 0.5
+    kl_coeff: float = 0.0
+    spend_mode: str = "forced"
     env: str = "v2"
     horizon: int = 0
     episode_steps: int = 0
@@ -77,6 +78,7 @@ def build_row(
     mode: str,
     budget: int,
     kl_coeff: float,
+    spend_mode: str,
     env: str,
     horizon: int,
     episode_steps: int,
@@ -99,7 +101,11 @@ def build_row(
         "mean_length": succ.get("mean_length"),
         "num_eval_episodes": succ.get("num_episodes"),
         "total_interventions": bud.get("total_interventions"),
+        "interventions_used": bud.get("interventions_used"),
         "mean_interventions_per_traj": bud.get("mean_interventions_per_traj"),
+        "mean_interventions_used": bud.get("mean_interventions_used"),
+        "mean_budget_cap_per_traj": bud.get("mean_budget_cap_per_traj"),
+        "budget_utilization": bud.get("budget_utilization"),
         "intervention_kind_counts": bud.get("intervention_kind_counts"),
         "avoided_bad_action_rate": steer.get("avoided_bad_action_rate"),
         "success_rate_with_intervention": steer.get(
@@ -126,6 +132,7 @@ def build_row(
         mode=mode,
         budget=budget,
         kl_coeff=kl_coeff,
+        spend_mode=spend_mode,
         env=env,
         horizon=horizon,
         episode_steps=episode_steps,
@@ -164,7 +171,8 @@ def _parse_args() -> argparse.Namespace:
     p.add_argument("--seed", type=int, default=0)
     p.add_argument("--mode", choices=["offline", "rounds"], default="offline")
     p.add_argument("--budget", type=int, default=0)
-    p.add_argument("--kl-coeff", type=float, default=0.5)
+    p.add_argument("--kl-coeff", type=float, default=0.0)
+    p.add_argument("--spend-mode", choices=["forced", "adaptive"], default="forced")
     p.add_argument("--env", default="v2")
     p.add_argument("--horizon", type=int, default=8)
     p.add_argument("--episode-steps", type=int, default=24)
@@ -195,6 +203,7 @@ if __name__ == "__main__":
         mode=args.mode,
         budget=args.budget,
         kl_coeff=args.kl_coeff,
+        spend_mode=args.spend_mode,
         env=args.env,
         horizon=args.horizon,
         episode_steps=args.episode_steps,

@@ -28,6 +28,11 @@ python "$APP_DIR/training/online_distill_trainer.py" \
     --num-actions "${NUM_ACTIONS:-4}" \
     --env "${ENV:-v1}" \
     ${EPISODE_STEPS:+--episode-steps "$EPISODE_STEPS"} \
+    --spend-mode "${SPEND_MODE:-adaptive}" \
+    --num-critical-nodes "${NUM_CRITICAL_NODES:-4}" \
+    --stochasticity "${STOCHASTICITY:-0.25}" \
+    --transition-noise "${TRANSITION_NOISE:-0.10}" \
+    ${REQUIRED_CRITICAL_PASSES:+--required-critical-passes "$REQUIRED_CRITICAL_PASSES"} \
     --rounds "${ROUNDS:-0}" \
     --episodes-per-round "${EPISODES_PER_ROUND:-64}" \
     --num-steps-per-round "${NUM_STEPS_PER_ROUND:-200}" \

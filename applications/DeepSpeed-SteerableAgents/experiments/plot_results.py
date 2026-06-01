@@ -11,6 +11,7 @@ Outputs (under ``--out-dir`` / ``plots/`` by default):
 Usage:
     python experiments/plot_results.py                # reads results/all.csv
     python experiments/plot_results.py --csv path/all.csv --out-dir plots/
+    python experiments/plot_results.py --env v3 --spend-mode adaptive
 """
 from __future__ import annotations
 
@@ -66,9 +67,20 @@ def _ensure_matplotlib():
         sys.exit(2)
 
 
-def plot_budget_sweep(rows, out_dir: str) -> None:
+def _filtered(rows, env_name: str, spend_mode: str):
+    return [
+        r for r in rows
+        if (not env_name or r.get("env") == env_name)
+        and (not spend_mode or r.get("spend_mode") == spend_mode)
+    ]
+
+
+def plot_budget_sweep(rows, out_dir: str, env_name: str, spend_mode: str) -> None:
     import matplotlib.pyplot as plt
-    bs = [r for r in rows if r.get("experiment") == "budget_sweep"]
+    bs = [
+        r for r in _filtered(rows, env_name, spend_mode)
+        if r.get("experiment") == "budget_sweep"
+    ]
     if not bs:
         print("[plot] no budget_sweep rows; skipping", file=sys.stderr); return
     buckets = _group(bs, ["budget"])
@@ -83,12 +95,11 @@ def plot_budget_sweep(rows, out_dir: str) -> None:
                 color="#1f77b4", ecolor="#888")
     ax.set_xlabel("Per-episode intervention budget B")
     ax.set_ylabel("Success rate (%)")
-    ax.set_title("Success vs. intervention budget (5 seeds, mean ± std)")
+    ax.set_title(
+        f"Success vs. intervention budget (env={env_name}, spend={spend_mode})"
+    )
     ax.set_ylim(0, 105)
     ax.grid(True, alpha=0.3)
-    ax.axhline(0.4, ls=":", color="grey", lw=1)
-    ax.text(7.5, 3, "B=0 baseline (0.4%)", color="grey",
-            fontsize=8, ha="right")
     # Annotate peak.
     peak_idx = max(range(len(ys)), key=lambda i: ys[i])
     ax.annotate(f"peak {ys[peak_idx]:.1f}%",
@@ -101,9 +112,9 @@ def plot_budget_sweep(rows, out_dir: str) -> None:
     print(f"[plot] wrote {out}")
 
 
-def plot_cost_per_uplift(rows, out_dir: str) -> None:
+def plot_cost_per_uplift(rows, out_dir: str, env_name: str, spend_mode: str) -> None:
     import matplotlib.pyplot as plt
-    bs = [r for r in rows if r.get("experiment") == "budget_sweep"
+    bs = [r for r in _filtered(rows, env_name, spend_mode) if r.get("experiment") == "budget_sweep"
           and _as_float(r.get("cost_per_uplift_point")) is not None]
     if not bs:
         return
@@ -126,9 +137,12 @@ def plot_cost_per_uplift(rows, out_dir: str) -> None:
     print(f"[plot] wrote {out}")
 
 
-def plot_ablation(rows, out_dir: str) -> None:
+def plot_ablation(rows, out_dir: str, env_name: str, spend_mode: str) -> None:
     import matplotlib.pyplot as plt
-    rs = [r for r in rows if r.get("experiment") == "distill_ablation"]
+    rs = [
+        r for r in _filtered(rows, env_name, spend_mode)
+        if r.get("experiment") == "distill_ablation"
+    ]
     if not rs:
         return
     buckets = _group(rs, ["kl_coeff"])
@@ -144,7 +158,9 @@ def plot_ablation(rows, out_dir: str) -> None:
     bars = ax.bar(labels, means, yerr=stds, capsize=6,
                   color=["#2ca02c", "#ff7f0e"], edgecolor="black", linewidth=0.8)
     ax.set_ylabel("Success rate (%)")
-    ax.set_title("Distillation ablation @ B=4  (5 seeds)")
+    ax.set_title(
+        f"Distillation ablation @ B=4 (env={env_name}, spend={spend_mode})"
+    )
     ax.set_ylim(min(means) - 4, 100.5)
     ax.grid(True, axis="y", alpha=0.3)
     for b, m, s in zip(bars, means, stds):
@@ -159,9 +175,12 @@ def plot_ablation(rows, out_dir: str) -> None:
     print(f"[plot] wrote {out}")
 
 
-def plot_offline_vs_rounds(rows, out_dir: str) -> None:
+def plot_offline_vs_rounds(rows, out_dir: str, env_name: str, spend_mode: str) -> None:
     import matplotlib.pyplot as plt
-    rs = [r for r in rows if r.get("experiment") == "offline_vs_rounds"]
+    rs = [
+        r for r in _filtered(rows, env_name, spend_mode)
+        if r.get("experiment") == "offline_vs_rounds"
+    ]
     if not rs:
         return
     buckets = _group(rs, ["mode"])
@@ -177,7 +196,10 @@ def plot_offline_vs_rounds(rows, out_dir: str) -> None:
     bars = ax.bar(labels, means, yerr=stds, capsize=6,
                   color=["#1f77b4", "#9467bd"], edgecolor="black", linewidth=0.8)
     ax.set_ylabel("Success rate (%)")
-    ax.set_title("Offline vs. rounds @ B=4, kl=0.0  (matched compute, 5 seeds)")
+    ax.set_title(
+        "Offline vs. rounds @ B=4, kl=0.0 "
+        f"(env={env_name}, spend={spend_mode})"
+    )
     ax.set_ylim(min(means) - 4, 100.5)
     ax.grid(True, axis="y", alpha=0.3)
     for b, m, s in zip(bars, means, stds):
@@ -198,6 +220,10 @@ def main() -> None:
                    help="Flat CSV produced by aggregate_results.py")
     p.add_argument("--out-dir", default="plots",
                    help="Where to write the .png files")
+    p.add_argument("--env", default="v3",
+                   help="Filter rows by env value before plotting")
+    p.add_argument("--spend-mode", default="adaptive",
+                   help="Filter rows by spend_mode before plotting")
     args = p.parse_args()
 
     if not os.path.isfile(args.csv):
@@ -208,10 +234,10 @@ def main() -> None:
     rows = _read_csv(args.csv)
     print(f"[plot] loaded {len(rows)} rows from {args.csv}")
 
-    plot_budget_sweep(rows, args.out_dir)
-    plot_cost_per_uplift(rows, args.out_dir)
-    plot_ablation(rows, args.out_dir)
-    plot_offline_vs_rounds(rows, args.out_dir)
+    plot_budget_sweep(rows, args.out_dir, args.env, args.spend_mode)
+    plot_cost_per_uplift(rows, args.out_dir, args.env, args.spend_mode)
+    plot_ablation(rows, args.out_dir, args.env, args.spend_mode)
+    plot_offline_vs_rounds(rows, args.out_dir, args.env, args.spend_mode)
 
 
 if __name__ == "__main__":

@@ -30,12 +30,22 @@ def evaluate(
     greedy: bool,
     env_name: str = "v1",
     episode_steps: int | None = None,
+    num_critical_nodes: int = 4,
+    stochasticity: float = 0.25,
+    transition_noise: float = 0.10,
+    required_critical_passes: int | None = None,
     allow_random_init: bool = False,
 ) -> dict:
     torch.manual_seed(seed)
     env_kwargs: dict = {}
-    if env_name == "v2" and episode_steps is not None:
+    if env_name in {"v2", "v3"} and episode_steps is not None:
         env_kwargs["episode_steps"] = int(episode_steps)
+    if env_name == "v3":
+        env_kwargs["num_critical_nodes"] = int(num_critical_nodes)
+        env_kwargs["stochasticity"] = float(stochasticity)
+        env_kwargs["transition_noise"] = float(transition_noise)
+        if required_critical_passes is not None:
+            env_kwargs["required_critical_passes"] = int(required_critical_passes)
     env = make_env(
         env_name, num_actions=num_actions, horizon=horizon, seed=seed,
         **env_kwargs,
@@ -107,11 +117,15 @@ def _parse_args() -> argparse.Namespace:
     p.add_argument("--num-actions", type=int, default=4)
     p.add_argument("--seed", type=int, default=1234)
     p.add_argument("--greedy", action="store_true")
-    p.add_argument("--env", type=str, default="v1", choices=["v1", "v2"])
+    p.add_argument("--env", type=str, default="v1", choices=["v1", "v2", "v3"])
     p.add_argument(
         "--episode-steps", type=int, default=None,
-        help="V2 only: cap on episode length; defaults to --horizon.",
+        help="V2/V3 only: cap on episode length; defaults to --horizon.",
     )
+    p.add_argument("--num-critical-nodes", type=int, default=4)
+    p.add_argument("--stochasticity", type=float, default=0.25)
+    p.add_argument("--transition-noise", type=float, default=0.10)
+    p.add_argument("--required-critical-passes", type=int, default=None)
     p.add_argument(
         "--allow-random-init", action="store_true",
         help="Permit eval against a freshly-initialised student (no checkpoint loaded).",
@@ -131,6 +145,10 @@ if __name__ == "__main__":
         greedy=args.greedy,
         env_name=args.env,
         episode_steps=args.episode_steps,
+        num_critical_nodes=args.num_critical_nodes,
+        stochasticity=args.stochasticity,
+        transition_noise=args.transition_noise,
+        required_critical_passes=args.required_critical_passes,
         allow_random_init=args.allow_random_init,
     )
     with open(args.output, "w", encoding="utf-8") as f:

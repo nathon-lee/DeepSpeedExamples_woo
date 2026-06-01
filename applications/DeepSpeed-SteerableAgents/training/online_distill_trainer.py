@@ -236,6 +236,11 @@ def train_rounds(
     global_budget_per_round: int,
     per_episode_budget: int,
     threshold: float,
+    spend_mode: str,
+    num_critical_nodes: int,
+    stochasticity: float,
+    transition_noise: float,
+    required_critical_passes: Optional[int],
     ds_config: str,
     batch_size: int,
     capacity: int,
@@ -252,8 +257,14 @@ def train_rounds(
 
     # Build a probe env once to lock obs_dim / num_actions for the student.
     env_kwargs = {}
-    if env_name == "v2" and episode_steps is not None:
+    if env_name in {"v2", "v3"} and episode_steps is not None:
         env_kwargs["episode_steps"] = int(episode_steps)
+    if env_name == "v3":
+        env_kwargs["num_critical_nodes"] = int(num_critical_nodes)
+        env_kwargs["stochasticity"] = float(stochasticity)
+        env_kwargs["transition_noise"] = float(transition_noise)
+        if required_critical_passes is not None:
+            env_kwargs["required_critical_passes"] = int(required_critical_passes)
     probe_env = make_env(
         env_name, num_actions=num_actions, horizon=horizon, seed=seed,
         **env_kwargs,
@@ -301,6 +312,11 @@ def train_rounds(
             output_path=rollouts_out,
             env_name=env_name,
             episode_steps=episode_steps,
+            spend_mode=spend_mode,
+            num_critical_nodes=num_critical_nodes,
+            stochasticity=stochasticity,
+            transition_noise=transition_noise,
+            required_critical_passes=required_critical_passes,
             student=student,
         )
 
@@ -370,11 +386,20 @@ def _parse_args() -> argparse.Namespace:
     )
     p.add_argument("--horizon", type=int, default=32)
     p.add_argument("--num-actions", type=int, default=4)
-    p.add_argument("--env", type=str, default="v1", choices=["v1", "v2"])
+    p.add_argument("--env", type=str, default="v1", choices=["v1", "v2", "v3"])
     p.add_argument(
         "--episode-steps", type=int, default=None,
-        help="V2 only: cap on episode length (used by rounds mode).",
+        help="V2/V3 only: cap on episode length (used by rounds mode).",
     )
+    p.add_argument(
+        "--spend-mode", type=str, default="adaptive",
+        choices=["forced", "adaptive"],
+        help="Intervention spend policy for rounds-mode collection.",
+    )
+    p.add_argument("--num-critical-nodes", type=int, default=4)
+    p.add_argument("--stochasticity", type=float, default=0.25)
+    p.add_argument("--transition-noise", type=float, default=0.10)
+    p.add_argument("--required-critical-passes", type=int, default=None)
 
     # ---- Rounds / online mode -------------------------------------------
     p.add_argument(
@@ -415,8 +440,20 @@ def _parse_args() -> argparse.Namespace:
 
 if __name__ == "__main__":
     args = _parse_args()
+    probe_env_kwargs = {}
+    if args.env in {"v2", "v3"} and args.episode_steps is not None:
+        probe_env_kwargs["episode_steps"] = args.episode_steps
+    if args.env == "v3":
+        probe_env_kwargs["num_critical_nodes"] = args.num_critical_nodes
+        probe_env_kwargs["stochasticity"] = args.stochasticity
+        probe_env_kwargs["transition_noise"] = args.transition_noise
+        if args.required_critical_passes is not None:
+            probe_env_kwargs["required_critical_passes"] = args.required_critical_passes
     probe_env = make_env(
-        args.env, num_actions=args.num_actions, horizon=args.horizon
+        args.env,
+        num_actions=args.num_actions,
+        horizon=args.horizon,
+        **probe_env_kwargs,
     )
     if args.rounds > 0:
         print(f"[train] rounds mode: rounds={args.rounds} "
@@ -433,6 +470,11 @@ if __name__ == "__main__":
             global_budget_per_round=args.global_budget_per_round,
             per_episode_budget=args.per_episode_budget,
             threshold=args.threshold,
+            spend_mode=args.spend_mode,
+            num_critical_nodes=args.num_critical_nodes,
+            stochasticity=args.stochasticity,
+            transition_noise=args.transition_noise,
+            required_critical_passes=args.required_critical_passes,
             ds_config=args.ds_config,
             batch_size=args.batch_size,
             capacity=args.capacity,
