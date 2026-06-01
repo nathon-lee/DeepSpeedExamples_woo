@@ -33,14 +33,13 @@ from .base_env import BaseEnv
 
 # Named difficulty presets. Explicit kwargs always override preset values.
 #
-# Calibration note (2026-06): medium previously used 4 critical nodes, so B=4
-# and B=8 both spent at most four useful interventions and saturated at the same
-# student success (~49%).  The paper-facing medium preset now exposes six local
-# critical decisions and requires four passes, giving B=4/B=8 room to separate
-# while keeping B=0 near zero.
+# Calibration note (2026-06): keep required passes explicit in presets.  Using
+# ceil(fraction * num_critical_nodes) caused accidental off-by-one difficulty
+# jumps (e.g. 0.67 * 6 -> ceil(4.02) = 5 instead of the intended 4/6).
 DIFFICULTY_PRESETS: Dict[str, Dict[str, Any]] = {
     "easy": dict(
         num_critical_nodes=3,
+        required_critical_passes=2,
         horizon=18,
         stochasticity=0.12,
         transition_noise=0.06,
@@ -49,6 +48,7 @@ DIFFICULTY_PRESETS: Dict[str, Dict[str, Any]] = {
     ),
     "medium": dict(
         num_critical_nodes=6,
+        required_critical_passes=4,
         horizon=32,
         stochasticity=0.18,
         transition_noise=0.08,
@@ -57,6 +57,7 @@ DIFFICULTY_PRESETS: Dict[str, Dict[str, Any]] = {
     ),
     "hard": dict(
         num_critical_nodes=7,
+        required_critical_passes=6,
         horizon=36,
         stochasticity=0.25,
         transition_noise=0.12,
@@ -65,13 +66,11 @@ DIFFICULTY_PRESETS: Dict[str, Dict[str, Any]] = {
     ),
 }
 
-# failure_softness -> fraction of critical nodes that must be passed to succeed.
-# Values are intentionally fractional so they scale across presets:
-#   high   + 3 nodes -> 2/3 (easy, not trivial)
-#   medium + 6 nodes -> 4/6 (paper-facing target)
-#   low    + 7 nodes -> 6/7 (challenging, but still soft-failure)
+# Fallback failure_softness -> fraction of critical nodes that must be passed to
+# succeed when callers construct a custom V3 without a preset-specific required
+# pass count. Presets above use explicit required_critical_passes for stability.
 _SOFTNESS_REQUIRED_FRACTION = {
-    "high": 0.67,
+    "high": 0.50,
     "medium": 0.67,
     "low": 0.80,
 }
@@ -132,9 +131,13 @@ class ToyLongHorizonEnvV3(BaseEnv):
 
         self.episode_steps = int(episode_steps if episode_steps is not None else self.horizon)
 
-        # Soft-failure: required passes default derives from failure_softness.
+        # Soft-failure: required passes default derives from the difficulty
+        # preset first, then from failure_softness for custom configurations.
+        preset_required = preset.get("required_critical_passes")
         if required_critical_passes is not None:
             self.required_critical_passes = int(required_critical_passes)
+        elif preset_required is not None:
+            self.required_critical_passes = int(preset_required)
         else:
             frac = _SOFTNESS_REQUIRED_FRACTION.get(self.failure_softness, 0.67)
             self.required_critical_passes = max(
