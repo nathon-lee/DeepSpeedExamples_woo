@@ -33,10 +33,11 @@ from .base_env import BaseEnv
 
 # Named difficulty presets. Explicit kwargs always override preset values.
 #
-# Calibration note (2026-06): the first V3 preset pass broke the v2 ceiling but
-# medium was still too easy after one intervention (B=1 ~= 84%).  These presets
-# move the paper-facing default to a more discriminative regime by increasing the
-# number of critical nodes, requiring more passes, and making hints less perfect.
+# Calibration note (2026-06): medium previously used 4 critical nodes, so B=4
+# and B=8 both spent at most four useful interventions and saturated at the same
+# student success (~49%).  The paper-facing medium preset now exposes six local
+# critical decisions and requires four passes, giving B=4/B=8 room to separate
+# while keeping B=0 near zero.
 DIFFICULTY_PRESETS: Dict[str, Dict[str, Any]] = {
     "easy": dict(
         num_critical_nodes=3,
@@ -47,16 +48,16 @@ DIFFICULTY_PRESETS: Dict[str, Dict[str, Any]] = {
         failure_softness="high",
     ),
     "medium": dict(
-        num_critical_nodes=4,
-        horizon=28,
-        stochasticity=0.20,
-        transition_noise=0.10,
+        num_critical_nodes=6,
+        horizon=32,
+        stochasticity=0.18,
+        transition_noise=0.08,
         intervention_effect_span=1,
         failure_softness="medium",
     ),
     "hard": dict(
-        num_critical_nodes=5,
-        horizon=32,
+        num_critical_nodes=7,
+        horizon=36,
         stochasticity=0.25,
         transition_noise=0.12,
         intervention_effect_span=1,
@@ -67,11 +68,11 @@ DIFFICULTY_PRESETS: Dict[str, Dict[str, Any]] = {
 # failure_softness -> fraction of critical nodes that must be passed to succeed.
 # Values are intentionally fractional so they scale across presets:
 #   high   + 3 nodes -> 2/3 (easy, not trivial)
-#   medium + 4 nodes -> 3/4 (paper-facing target)
-#   low    + 5 nodes -> 4/5 (challenging, but not all-or-nothing)
+#   medium + 6 nodes -> 4/6 (paper-facing target)
+#   low    + 7 nodes -> 6/7 (challenging, but still soft-failure)
 _SOFTNESS_REQUIRED_FRACTION = {
     "high": 0.67,
-    "medium": 0.75,
+    "medium": 0.67,
     "low": 0.80,
 }
 
@@ -95,7 +96,7 @@ class ToyLongHorizonEnvV3(BaseEnv):
     def __init__(
         self,
         num_actions: int = 4,
-        horizon: int = 28,
+        horizon: int = 32,
         seed: Optional[int] = None,
         episode_steps: Optional[int] = None,
         num_critical_nodes: Optional[int] = None,
@@ -118,14 +119,14 @@ class ToyLongHorizonEnvV3(BaseEnv):
         self.difficulty = (difficulty or "").lower()
         self.num_actions = int(num_actions)
         # ``horizon`` has a non-None default, so only honour the preset when the
-        # caller left it at the documented default and selected a difficulty.
-        if difficulty and horizon in {24, 28}:
+        # caller left it at a documented V3 default and selected a difficulty.
+        if difficulty and horizon in {24, 28, 32}:
             self.horizon = int(preset.get("horizon", horizon))
         else:
             self.horizon = int(horizon)
-        self.num_critical_nodes = max(1, int(pick("num_critical_nodes", num_critical_nodes, 4)))
-        self.stochasticity = float(max(0.0, min(1.0, pick("stochasticity", stochasticity, 0.20))))
-        self.transition_noise = float(max(0.0, min(1.0, pick("transition_noise", transition_noise, 0.10))))
+        self.num_critical_nodes = max(1, int(pick("num_critical_nodes", num_critical_nodes, 6)))
+        self.stochasticity = float(max(0.0, min(1.0, pick("stochasticity", stochasticity, 0.18))))
+        self.transition_noise = float(max(0.0, min(1.0, pick("transition_noise", transition_noise, 0.08))))
         self.intervention_effect_span = max(1, int(pick("intervention_effect_span", intervention_effect_span, 1)))
         self.failure_softness = str(pick("failure_softness", failure_softness, "medium")).lower()
 
@@ -135,7 +136,7 @@ class ToyLongHorizonEnvV3(BaseEnv):
         if required_critical_passes is not None:
             self.required_critical_passes = int(required_critical_passes)
         else:
-            frac = _SOFTNESS_REQUIRED_FRACTION.get(self.failure_softness, 0.75)
+            frac = _SOFTNESS_REQUIRED_FRACTION.get(self.failure_softness, 0.67)
             self.required_critical_passes = max(
                 1, int(math.ceil(frac * self.num_critical_nodes))
             )
