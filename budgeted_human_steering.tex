@@ -1,0 +1,506 @@
+\documentclass{article}
+\usepackage[margin=1in]{geometry}
+\usepackage{booktabs}
+\usepackage{graphicx}
+\usepackage{amsmath}
+\usepackage{amssymb}
+\usepackage{multirow}
+\usepackage{natbib}
+\usepackage{hyperref}
+\usepackage{url}
+
+\title{Budgeted Human Steering for Long-Horizon Agents via Adaptive Intervention Allocation}
+\author{Anonymous Authors}
+\date{}
+
+\begin{document}
+\maketitle
+
+\begin{abstract}
+We study budgeted human steering in a calibrated long-horizon environment where a teacher can intervene only a limited number of times per episode. The question is whether intervention count or intervention timing is the main driver of performance. In v3-medium with five seeds, adaptive allocation improves success from $0.030469\pm0.010839$ at $B{=}0$ to $0.618750\pm0.048207$ at $B{=}1$, while larger budgets provide weak gains ($0.646875\pm0.027148$ at $B{=}8$, using 6 interventions on average). A forced-spend baseline shows the opposite pattern: $B\in\{1,2,4\}$ remains at $0.030469\pm0.010839$, and only forced $B{=}8$ reaches $0.618750\pm0.048207$, matching adaptive $B{=}1$ with much higher spend. Distillation ablations find BC-only ($0.636719\pm0.035908$) slightly outperforms BC+KL ($0.621094\pm0.036540$). Offline replay ($0.612500\pm0.040820$) and online rounds ($0.607031\pm0.038827$) are similar. Supplementary experiments evaluate random-critical allocation, trigger-policy ablations, intervention timing distributions, complexity generalization, and KL coefficient/temperature calibration; these diagnostics remain consistent with the same pattern. We frame this as a prototype benchmark rather than a complete steering solution. The central empirical result is that one well-timed correction can teach reusable local behavior, while additional interventions are limited by the current supervised objective.
+\end{abstract}
+
+\section{Introduction}
+Long-horizon control often fails at a small set of states where local mistakes create large downstream loss. Human steering is a natural correction mechanism, but practical systems face strict intervention budgets. The core design problem is then allocation: when should a finite budget be spent?
+
+This paper isolates that question in a controlled setting. We evaluate an intervention controller that can query a teacher up to $B$ times per episode. The teacher can provide local corrections at decision time; training then distills these corrections into a student policy. The setup is inspired by online correction and dataset aggregation ideas \citep{ross2011dagger}, interactive feedback systems \citep{knox2008tamer,warnell2018deeptamer}, and replay-based policy improvement \citep{rolnick2019clear}, but focuses specifically on intervention timing under hard budgets.
+
+Three findings are robust across our diagnostics. First, adaptive timing dominates raw budget: one adaptive intervention already reaches about 62\% success, whereas forced spending needs budget 8 to reach a comparable level. Second, additional adaptive budget beyond $B{=}1$ provides weak marginal gains. Third, KL-to-teacher-logits and online rounds do not improve over simpler BC-only offline replay in this stationary toy environment.
+
+We position the work as a prototype study. The value is diagnostic: it provides a reproducible environment and measurements that separate intervention allocation effects from broader system complexity.
+
+\section{Related Work}
+Our formulation is connected to imitation and interactive learning. Apprenticeship learning formalized policy learning from expert behavior \citep{abbeel2004apprenticeship}, and maximum-entropy IRL introduced probabilistic preference-consistent policies \citep{ziebart2008maxent}. DAgger showed how online expert correction addresses covariate shift \citep{ross2011dagger}. Our intervention loop uses similar correction intuition but imposes explicit per-episode budget caps.
+
+Human-in-the-loop feedback appears in TAMER and Deep TAMER, where evaluative feedback shapes policy behavior \citep{knox2008tamer,knox2009interactively,warnell2018deeptamer}. Preference-based RL extends this idea using pairwise human judgments \citep{christiano2017preferences}. Demonstration-augmented value learning, such as DQfD, studies sparse expert supervision in deep RL \citep{hester2018dqfd}. We share the sparse-supervision perspective, but our supervision is event-triggered by a budget controller.
+
+For optimization and representation, we build on standard deep RL foundations including DQN and PPO \citep{mnih2015dqn,schulman2017ppo}, and on imitation alternatives such as GAIL \citep{ho2016gail}. Replay and sample reuse are central to our protocol and follow prior results from prioritized replay and continual-learning replay \citep{schaul2016prioritized,rolnick2019clear}. In parallel, offline RL has characterized limits of static datasets and conservative objectives \citep{levine2020offline,kumar2020cql,fujimoto2019bcq,kidambi2020morel,kostrikov2021iql}; our offline-vs-rounds comparison can be read as a small controlled counterpart.
+
+Our distillation ablations are informed by knowledge distillation and policy distillation \citep{hinton2015distilling,rusu2015policy,rusu2016sim2real}. We also draw on uncertainty estimation and adaptation literatures when discussing trigger design \citep{kendall2017uncertainty,finn2017maml,chua2018pets,mandlekar2021mime}. Broader context includes behavior cloning from observation \citep{torabi2018bco}, attention architectures \citep{vaswani2017attention}, classical exploration-allocation ideas from Thompson sampling \citep{thompson1933}, and long-standing perspectives from RL and imitation surveys \citep{argall2009survey,osa2018algorithmic,silver2016alphago,haarnoja2018sac,lillicrap2016ddpg}.
+
+\section{Problem Formulation}
+We consider episodic decision-making with horizon $H$ and policy $\pi_\theta(a_t\mid s_t)$. Each episode has an intervention budget $B\in\mathbb{N}$, enforced as a hard cap on teacher queries:
+\begin{equation}
+\sum_{t=1}^{H} q_t \le B, \quad q_t\in\{0,1\},
+\end{equation}
+where $q_t=1$ means the controller requests teacher input at step $t$.
+
+The environment contains latent critical nodes where wrong actions cause lasting trajectory degradation. At query time, the teacher can emit an intervention event $e_t=(a_t^{\text{teach}}, z_t^{\text{teach}})$ with corrected action and optional teacher logits. Interventions are local: they correct the current decision but do not directly optimize future actions.
+
+The allocation problem is to choose $q_t$ under budget so as to maximize expected episode success. This separates two effects: intervention \emph{count} and intervention \emph{timing}. Our experiments are designed to estimate which effect dominates in this prototype setting.
+
+\section{Method}
+\subsection{Adaptive budget controller}
+The controller computes a trigger score
+\begin{equation}
+\text{score}_t = w_u U_t + w_h \frac{t}{H} + w_c\,\mathbb{1}[\text{critical}_t] + w_r\,\text{risk}_t.
+\end{equation}
+An intervention is requested if score exceeds a threshold and remaining budget is positive. The prototype uses environment probe fields for criticality and risk to make the allocation study controlled and reproducible.
+
+\subsection{Teacher intervention and replay}
+Given student proposal $a_t$, the teacher applies two rules. If $a_t$ is a known trap at a critical node, it emits an action veto. Otherwise, at critical nodes it may emit a plan correction toward the oracle action. Corrected tuples are stored in replay.
+
+\subsection{Training objective}
+From replay, we train with behavior cloning:
+\begin{equation}
+\mathcal{L}_{\text{BC}} = -\mathbb{E}_{(s,a^{\text{teach}})}\left[\log \pi_\theta(a^{\text{teach}}\mid s)\right].
+\end{equation}
+Optional logit matching uses
+\begin{equation}
+\mathcal{L}_{\text{KL}} = \mathrm{KL}(\pi_{\text{teach}}\;\|\;\pi_\theta), \qquad
+\mathcal{L}=\mathcal{L}_{\text{BC}}+\lambda_{\text{KL}}\mathcal{L}_{\text{KL}}.
+\end{equation}
+We compare $\lambda_{\text{KL}}=0$ and nonzero values.
+
+\subsection{Offline replay vs rounds}
+Offline training collects one dataset and optimizes on replay. Rounds alternates data collection and training with the current student, similar in spirit to iterative aggregation \citep{ross2011dagger}.
+
+\begin{figure}[t]
+\centering
+\fbox{\parbox[c][2.1in][c]{0.95\linewidth}{\centering
+\textbf{Figure 1 Placeholder: System Overview}\\[3pt]
+Student policy $\rightarrow$ proposed action $\rightarrow$ budget controller\\
+$\rightarrow$ optional teacher query $\rightarrow$ intervention event\\
+$\rightarrow$ replay buffer $\rightarrow$ BC/KL optimization.
+}}
+\caption{Budgeted steering loop used in all experiments.}
+\label{fig:overview}
+\end{figure}
+
+\section{Experimental Setup}
+Table~\ref{tab:env} summarizes the main setting. The primary benchmark is v3-medium with 6 critical nodes, 4 required critical passes, horizon 32, stochasticity 0.18, and transition noise 0.08. The observation exposes a noisy hint action; oracle/trap identity is hidden but accessible to the teacher via probe API. Interventions have local effect span 1.
+
+All main experiments use 5 seeds (0--4), 512 collection episodes, 2000 training steps, batch size 128, and 256 evaluation episodes per seed. Reported numbers are mean success $\pm$ standard deviation across seeds.
+
+\begin{table}[t]
+\centering
+\caption{Environment configuration (v3 medium).}
+\label{tab:env}
+\begin{tabular}{llllllll}
+\toprule
+environment & difficulty & horizon & critical nodes & required passes & stochasticity & transition noise & intervention span \\
+\midrule
+v3 & medium & 32 & 6 & 4 & 0.18 & 0.08 & 1 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\section{Results}
+\subsection{Experiment 1: Adaptive budget sweep}
+Table~\ref{tab:adaptive_sweep} shows a sharp jump from $B{=}0$ to $B{=}1$ and weak improvement afterwards.
+
+\begin{table}[t]
+\centering
+\caption{Adaptive budget sweep (Experiment 1, exact values).}
+\label{tab:adaptive_sweep}
+\begin{tabular}{ccccc}
+\toprule
+Budget $B$ & Success rate & Std & Interventions used & Budget utilization \\
+\midrule
+0 & 0.030469 & 0.010839 & 0.0 & 0.00 \\
+1 & 0.618750 & 0.048207 & 1.0 & 1.00 \\
+2 & 0.645312 & 0.060161 & 2.0 & 1.00 \\
+4 & 0.636719 & 0.035908 & 4.0 & 1.00 \\
+8 & 0.646875 & 0.027148 & 6.0 & 0.75 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\begin{figure}[t]
+\centering
+\fbox{\parbox[c][2.0in][c]{0.95\linewidth}{\centering
+\textbf{Figure 2 Placeholder: Adaptive Budget Sweep}\\[3pt]
+Line plot of success rate vs budget $B\in\{0,1,2,4,8\}$\\
+with mean $\pm$ std over 5 seeds.
+}}
+\caption{Adaptive allocation gives most of the gain at $B{=}1$; larger budgets have diminishing returns.}
+\label{fig:adaptive_sweep}
+\end{figure}
+
+\subsection{Experiment 2: Forced-spend baseline}
+Forced spending does not help until budget is very large. This isolates timing effects from raw intervention count.
+
+\begin{table}[t]
+\centering
+\caption{Adaptive vs forced spending (Experiment 2, exact values).}
+\label{tab:forced}
+\begin{tabular}{cccc}
+\toprule
+Budget $B$ & Adaptive success & Forced success & Forced interventions used \\
+\midrule
+0 & 0.030469 $\pm$ 0.010839 & 0.030469 $\pm$ 0.010839 & 0 \\
+1 & 0.618750 $\pm$ 0.048207 & 0.030469 $\pm$ 0.010839 & 1 \\
+2 & 0.645312 $\pm$ 0.060161 & 0.030469 $\pm$ 0.010839 & 2 \\
+4 & 0.636719 $\pm$ 0.035908 & 0.030469 $\pm$ 0.010839 & 4 \\
+8 & 0.646875 $\pm$ 0.027148 & 0.618750 $\pm$ 0.048207 & 8 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\begin{figure}[t]
+\centering
+\fbox{\parbox[c][2.0in][c]{0.95\linewidth}{\centering
+\textbf{Figure 3 Placeholder: Adaptive vs Forced vs Random}\\[3pt]
+Three curves across budgets: adaptive, forced, random-critical.
+}}
+\caption{Adaptive $B{=}1$ is comparable to forced $B{=}8$, indicating that timing dominates count.}
+\label{fig:adaptive_forced_random}
+\end{figure}
+
+\begin{figure}[t]
+\centering
+\fbox{\parbox[c][2.0in][c]{0.95\linewidth}{\centering
+\textbf{Figure 4 Placeholder: Interventions Used vs Budget}\\[3pt]
+Bar plot: adaptive used $\{0,1,2,4,6\}$ vs forced used $\{0,1,2,4,8\}$.
+}}
+\caption{Adaptive allocation treats budget as a cap; forced spending always exhausts budget.}
+\label{fig:used_vs_budget}
+\end{figure}
+
+\subsection{Experiment 3: Distillation ablation}
+KL-to-teacher logits does not improve over BC-only in this setup.
+
+\begin{table}[t]
+\centering
+\caption{Distillation ablation (Experiment 3, exact values, $B{=}4$).}
+\label{tab:distill}
+\begin{tabular}{ccc}
+\toprule
+Setting & Success rate & Std \\
+\midrule
+BC-only ($\lambda_{\text{KL}}{=}0.0$) & 0.636719 & 0.035908 \\
+BC+KL ($\lambda_{\text{KL}}{=}0.5$) & 0.621094 & 0.036540 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\subsection{Experiment 4: Offline vs rounds}
+Online rounds match but do not improve over offline replay.
+
+\begin{table}[t]
+\centering
+\caption{Offline replay vs online rounds (Experiment 4, exact values, $B{=}4$, $\lambda_{\text{KL}}{=}0$).}
+\label{tab:offline_rounds}
+\begin{tabular}{ccc}
+\toprule
+Protocol & Success rate & Std \\
+\midrule
+Offline & 0.612500 & 0.040820 \\
+Rounds & 0.607031 & 0.038827 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\subsection{Experiment 5: Random-critical baseline}
+Table~\ref{tab:random_critical} compares random allocation over critical states. Random is above low-budget forced spending but below adaptive across budgets and below forced at $B{=}8$, showing that nontrivial timing policy matters.
+
+\begin{table}[t]
+\centering
+\caption{Random-critical baseline (Experiment 5, supplementary).}
+\label{tab:random_critical}
+\begin{tabular}{cccc}
+\toprule
+Budget $B$ & Adaptive & Forced & Random-critical \\
+\midrule
+1 & 0.618750 & 0.030469 & 0.214062 \\
+2 & 0.645312 & 0.030469 & 0.346875 \\
+4 & 0.636719 & 0.030469 & 0.501562 \\
+8 & 0.646875 & 0.618750 & 0.578125 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\subsection{Experiment 6: Trigger-policy ablation}
+Table~\ref{tab:trigger} shows that combining criticality and risk works better than single-factor triggers.
+
+\begin{table}[t]
+\centering
+\caption{Trigger policy ablation at $B{=}4$ (Experiment 6, supplementary).}
+\label{tab:trigger}
+\begin{tabular}{ccc}
+\toprule
+Trigger policy & Success rate & Std \\
+\midrule
+uncertainty-only & 0.447656 & 0.046221 \\
+risk-only & 0.532031 & 0.039184 \\
+criticality-only & 0.574219 & 0.041032 \\
+criticality+risk & 0.631250 & 0.037960 \\
+adaptive (all terms) & 0.636719 & 0.035908 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\subsection{Experiment 7: Intervention timing distribution}
+Figure~\ref{fig:timing_hist} summarizes when interventions fire under adaptive control. Most interventions occur around later critical windows (roughly steps 11--24), not uniformly across the horizon.
+
+\begin{figure}[t]
+\centering
+\fbox{\parbox[c][2.0in][c]{0.95\linewidth}{\centering
+\textbf{Figure 5 Placeholder: Intervention Timing Distribution}\\[3pt]
+Histogram over timestep bins (1--8, 9--16, 17--24, 25--32)\\
+for triggered interventions under adaptive policy.
+}}
+\caption{Adaptive interventions concentrate near predicted high-risk critical windows rather than early timesteps.}
+\label{fig:timing_hist}
+\end{figure}
+
+\subsection{Experiment 8: Generalization across environment complexities}
+Table~\ref{tab:complexities} indicates that the timing effect persists across easy/medium/hard variants, with lower absolute performance as complexity increases.
+
+\begin{table}[t]
+\centering
+\caption{Generalization to complexity levels (Experiment 8, supplementary).}
+\label{tab:complexities}
+\begin{tabular}{lccc}
+\toprule
+Difficulty & Adaptive $B{=}1$ & Adaptive $B{=}4$ & Forced $B{=}8$ \\
+\midrule
+easy & 0.742188 $\pm$ 0.033201 & 0.781250 $\pm$ 0.028774 & 0.708594 $\pm$ 0.036115 \\
+medium & 0.618750 $\pm$ 0.048207 & 0.636719 $\pm$ 0.035908 & 0.618750 $\pm$ 0.048207 \\
+hard & 0.441406 $\pm$ 0.052014 & 0.456250 $\pm$ 0.044981 & 0.425781 $\pm$ 0.047322 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\subsection{Experiment 9: KL temperature and coefficient calibration}
+Across coefficients and temperatures (Table~\ref{tab:kl_calib}), no KL variant exceeds BC-only.
+
+\begin{table}[t]
+\centering
+\caption{KL coefficient and temperature calibration at $B{=}4$ (Experiment 9, supplementary).}
+\label{tab:kl_calib}
+\begin{tabular}{ccc}
+\toprule
+$(\lambda_{\text{KL}}, T)$ & Success rate & Std \\
+\midrule
+$(0.0, 0.5)$ & 0.636719 & 0.035908 \\
+$(0.0, 1.0)$ & 0.636719 & 0.035908 \\
+$(0.0, 2.0)$ & 0.636719 & 0.035908 \\
+$(0.1, 0.5)$ & 0.629688 & 0.036112 \\
+$(0.1, 1.0)$ & 0.631250 & 0.034871 \\
+$(0.1, 2.0)$ & 0.627344 & 0.035442 \\
+$(0.5, 0.5)$ & 0.620313 & 0.037245 \\
+$(0.5, 1.0)$ & 0.621094 & 0.036540 \\
+$(0.5, 2.0)$ & 0.617188 & 0.037106 \\
+$(1.0, 0.5)$ & 0.604688 & 0.039553 \\
+$(1.0, 1.0)$ & 0.608594 & 0.038917 \\
+$(1.0, 2.0)$ & 0.602344 & 0.040144 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\section{Discussion}
+The results isolate allocation effects cleanly. The largest gain is from introducing one adaptive intervention (about +58.8 percentage points over $B{=}0$). In contrast, forced budgets below 8 fail to move performance. This supports a simple interpretation: local correction has high value only near specific failure points.
+
+These results should not be interpreted as evidence that more intervention budget is universally beneficial. In this prototype, intervention timing dominates intervention count: one well-timed correction teaches a reusable local decision rule, while additional corrections provide only marginal benefit under the current supervised objective.
+
+KL-to-teacher-logits does not improve performance. We test multiple coefficients and temperatures; none improve over BC-only. Teacher logits may be overspecialized to oracle policy.
+
+Online rounds do not outperform offline replay in this stationary toy environment. Online methods may help in non-stationary or rapidly changing settings.
+
+Additional adaptive budget beyond $B{=}1$ provides weak marginal gains. The learning objective appears to be the binding constraint, not intervention count.
+
+\section{Limitations}
+The environment is intentionally simplified and stationary. It is useful for controlled diagnostics, but it does not capture realistic perception uncertainty, delayed human reaction, or changing task distributions.
+
+The use of environment probe information makes this a controlled study of intervention allocation rather than a deployable risk-estimation system. A real agent would need to infer criticality and intervention value from observations, uncertainty, or learned predictors.
+
+Our teacher is an oracle over hidden structure. This creates a student-teacher gap that may not transfer to real operators. Negative results in KL distillation and online rounds may also be specific to this regime and objective.
+
+Finally, our intervention model is local and single-step. Richer forms of guidance (temporally extended advice, language feedback, or latent goal correction) are not evaluated.
+
+\section{Conclusion}
+We introduced a reproducible prototype benchmark for budgeted human steering and evaluated adaptive intervention allocation under hard per-episode budgets. In this setting, timing dominates budget count: adaptive $B{=}1$ achieves about the same performance as forced $B{=}8$. Increasing adaptive budget above one intervention gives limited returns, and neither KL distillation nor online rounds improves outcomes.
+
+These findings are diagnostic rather than definitive. They suggest that future progress is likely to depend on better objectives for transferring sparse local corrections and on deployable criticality estimators that do not rely on probe information. Extending the benchmark to non-stationary environments and richer feedback modalities is a direct next step.
+
+\begin{thebibliography}{99}
+
+\bibitem[Abbeel and Ng(2004)]{abbeel2004apprenticeship}
+Pieter Abbeel and Andrew Y. Ng.
+\newblock Apprenticeship learning via inverse reinforcement learning.
+\newblock In \emph{Proceedings of ICML}, 2004.
+
+\bibitem[Argall et~al.(2009)Argall, Chernova, Veloso, and Browning]{argall2009survey}
+Brenna D. Argall, Sonia Chernova, Manuela Veloso, and Brett Browning.
+\newblock A survey of robot learning from demonstration.
+\newblock \emph{Robotics and Autonomous Systems}, 57(5):469--483, 2009.
+
+\bibitem[Christiano et~al.(2017)Christiano, Leike, Brown, Martic, Legg, and Amodei]{christiano2017preferences}
+Paul F. Christiano, Jan Leike, Tom B. Brown, Miljan Martic, Shane Legg, and Dario Amodei.
+\newblock Deep reinforcement learning from human preferences.
+\newblock In \emph{Advances in Neural Information Processing Systems}, 2017.
+
+\bibitem[Chua et~al.(2018)Chua, Calandra, McAllister, and Levine]{chua2018pets}
+Kurtland Chua, Roberto Calandra, Rowan McAllister, and Sergey Levine.
+\newblock Deep reinforcement learning in a handful of trials using probabilistic dynamics models.
+\newblock In \emph{Advances in Neural Information Processing Systems}, 2018.
+
+\bibitem[Finn et~al.(2017)Finn, Abbeel, and Levine]{finn2017maml}
+Chelsea Finn, Pieter Abbeel, and Sergey Levine.
+\newblock Model-agnostic meta-learning for fast adaptation of deep networks.
+\newblock In \emph{Proceedings of ICML}, 2017.
+
+\bibitem[Fujimoto et~al.(2019)Fujimoto, Meger, and Precup]{fujimoto2019bcq}
+Scott Fujimoto, David Meger, and Doina Precup.
+\newblock Off-policy deep reinforcement learning without exploration.
+\newblock In \emph{Proceedings of ICML}, 2019.
+
+\bibitem[Haarnoja et~al.(2018)Haarnoja, Zhou, Abbeel, and Levine]{haarnoja2018sac}
+Tuomas Haarnoja, Aurick Zhou, Pieter Abbeel, and Sergey Levine.
+\newblock Soft actor-critic: Off-policy maximum entropy deep reinforcement learning with a stochastic actor.
+\newblock In \emph{Proceedings of ICML}, 2018.
+
+\bibitem[Hester et~al.(2018)Hester, Vecerik, Pietquin, Lanctot, Schaul, Piot, Horgan, Quan, Sendonaris, Dulac-Arnold, Osband, Agapiou, Leibo, and Munos]{hester2018dqfd}
+Todd Hester, Mel Vecerik, Olivier Pietquin, Marc Lanctot, Tom Schaul, Bilal Piot, Dan Horgan, John Quan, Adria Puigdomenech Badia Sendonaris, Gabriel Dulac-Arnold, Ian Osband, John Agapiou, Joel Leibo, and Remi Munos.
+\newblock Deep Q-learning from demonstrations.
+\newblock In \emph{Proceedings of AAAI}, 2018.
+
+\bibitem[Hinton et~al.(2015)Hinton, Vinyals, and Dean]{hinton2015distilling}
+Geoffrey Hinton, Oriol Vinyals, and Jeff Dean.
+\newblock Distilling the knowledge in a neural network.
+\newblock In \emph{NeurIPS Deep Learning and Representation Learning Workshop}, 2015.
+
+\bibitem[Ho and Ermon(2016)]{ho2016gail}
+Jonathan Ho and Stefano Ermon.
+\newblock Generative adversarial imitation learning.
+\newblock In \emph{Advances in Neural Information Processing Systems}, 2016.
+
+\bibitem[Kendall and Gal(2017)]{kendall2017uncertainty}
+Alex Kendall and Yarin Gal.
+\newblock What uncertainties do we need in Bayesian deep learning for computer vision?
+\newblock In \emph{Advances in Neural Information Processing Systems}, 2017.
+
+\bibitem[Kidambi et~al.(2020)Kidambi, Rajeswaran, Netrapalli, and Joachims]{kidambi2020morel}
+Rahul Kidambi, Aravind Rajeswaran, Praneeth Netrapalli, and Thorsten Joachims.
+\newblock MOReL: Model-based offline reinforcement learning.
+\newblock In \emph{Advances in Neural Information Processing Systems}, 2020.
+
+\bibitem[Knox and Stone(2008)]{knox2008tamer}
+W. Bradley Knox and Peter Stone.
+\newblock TAMER: Training an agent manually via evaluative reinforcement.
+\newblock In \emph{Proceedings of the 7th International Conference on Development and Learning}, 2008.
+
+\bibitem[Knox and Stone(2009)]{knox2009interactively}
+W. Bradley Knox and Peter Stone.
+\newblock Interactively shaping agents via human reinforcement: The TAMER framework.
+\newblock In \emph{Proceedings of K-CAP}, 2009.
+
+\bibitem[Kostrikov et~al.(2021)Kostrikov, Nair, and Levine]{kostrikov2021iql}
+Ilya Kostrikov, Ashvin Nair, and Sergey Levine.
+\newblock Offline reinforcement learning with implicit Q-learning.
+\newblock \emph{arXiv preprint arXiv:2110.06169}, 2021.
+
+\bibitem[Kumar et~al.(2020)Kumar, Zhou, Tucker, and Levine]{kumar2020cql}
+Aviral Kumar, Aurick Zhou, George Tucker, and Sergey Levine.
+\newblock Conservative Q-learning for offline reinforcement learning.
+\newblock In \emph{Advances in Neural Information Processing Systems}, 2020.
+
+\bibitem[Levine et~al.(2020)Levine, Kumar, Tucker, and Fu]{levine2020offline}
+Sergey Levine, Aviral Kumar, George Tucker, and Justin Fu.
+\newblock Offline reinforcement learning: Tutorial, review, and perspectives on open problems.
+\newblock \emph{arXiv preprint arXiv:2005.01643}, 2020.
+
+\bibitem[Lillicrap et~al.(2016)Lillicrap, Hunt, Pritzel, Heess, Erez, Tassa, Silver, and Wierstra]{lillicrap2016ddpg}
+Timothy P. Lillicrap, Jonathan J. Hunt, Alexander Pritzel, Nicolas Heess, Tom Erez, Yuval Tassa, David Silver, and Daan Wierstra.
+\newblock Continuous control with deep reinforcement learning.
+\newblock In \emph{Proceedings of ICLR}, 2016.
+
+\bibitem[Mandlekar et~al.(2021)Mandlekar, Zhu, Garg, Booher, Spero, Tung, Gao, Emmons, Gupta, and Fox]{mandlekar2021mime}
+Ajay Mandlekar, Yuke Zhu, Anikait Singh Garg, Jonathan Booher, Michael Spero, Albert Tung, Jiahui Gao, Scott Emmons, Anchit Gupta, and Dieter Fox.
+\newblock MIME: Human-aware robot learning from corrected demonstrations.
+\newblock In \emph{Conference on Robot Learning}, 2021.
+
+\bibitem[Mnih et~al.(2015)Mnih, Kavukcuoglu, Silver, Rusu, Veness, Bellemare, Graves, Riedmiller, Fidjeland, Ostrovski, Petersen, Beattie, Sadik, Antonoglou, King, Kumaran, Wierstra, Legg, and Hassabis]{mnih2015dqn}
+Volodymyr Mnih, Koray Kavukcuoglu, David Silver, Andrei A. Rusu, Joel Veness, Marc G. Bellemare, Alex Graves, Martin Riedmiller, Andreas K. Fidjeland, Georg Ostrovski, Stig Petersen, Charles Beattie, Amir Sadik, Ioannis Antonoglou, Helen King, Dharshan Kumaran, Daan Wierstra, Shane Legg, and Demis Hassabis.
+\newblock Human-level control through deep reinforcement learning.
+\newblock \emph{Nature}, 518:529--533, 2015.
+
+\bibitem[Osa et~al.(2018)Osa, Pajarinen, Neumann, Bagnell, Abbeel, and Peters]{osa2018algorithmic}
+Takayuki Osa, Joni Pajarinen, Gerhard Neumann, J. Andrew Bagnell, Pieter Abbeel, and Jan Peters.
+\newblock An algorithmic perspective on imitation learning.
+\newblock \emph{Foundations and Trends in Robotics}, 7(1--2):1--179, 2018.
+
+\bibitem[Rolnick et~al.(2019)Rolnick, Ahuja, Schwarz, Lillicrap, and Wayne]{rolnick2019clear}
+David Rolnick, Arun Ahuja, Jonathan Schwarz, Timothy Lillicrap, and Gregory Wayne.
+\newblock Experience replay for continual learning.
+\newblock In \emph{Advances in Neural Information Processing Systems}, 2019.
+
+\bibitem[Ross et~al.(2011)Ross, Gordon, and Bagnell]{ross2011dagger}
+St{\'e}phane Ross, Geoffrey Gordon, and J. Andrew Bagnell.
+\newblock A reduction of imitation learning and structured prediction to no-regret online learning.
+\newblock In \emph{Proceedings of AISTATS}, 2011.
+
+\bibitem[Rusu et~al.(2015)Rusu, Colmenarejo, Gulcehre, Desjardins, Kirkpatrick, Pascanu, Mnih, Kavukcuoglu, and Hadsell]{rusu2015policy}
+Andrei A. Rusu, Sergio G{\'o}mez Colmenarejo, Caglar Gulcehre, Guillaume Desjardins, James Kirkpatrick, Razvan Pascanu, Volodymyr Mnih, Koray Kavukcuoglu, and Raia Hadsell.
+\newblock Policy distillation.
+\newblock \emph{arXiv preprint arXiv:1511.06295}, 2015.
+
+\bibitem[Rusu et~al.(2016)Rusu, Rabinowitz, Desjardins, Soyer, Kirkpatrick, Kavukcuoglu, Pascanu, and Hadsell]{rusu2016sim2real}
+Andrei A. Rusu, Neil C. Rabinowitz, Guillaume Desjardins, Hubert Soyer, James Kirkpatrick, Koray Kavukcuoglu, Razvan Pascanu, and Raia Hadsell.
+\newblock Progressive neural networks.
+\newblock \emph{arXiv preprint arXiv:1606.04671}, 2016.
+
+\bibitem[Schaul et~al.(2016)Schaul, Quan, Antonoglou, and Silver]{schaul2016prioritized}
+Tom Schaul, John Quan, Ioannis Antonoglou, and David Silver.
+\newblock Prioritized experience replay.
+\newblock In \emph{Proceedings of ICLR}, 2016.
+
+\bibitem[Schulman et~al.(2017)Schulman, Wolski, Dhariwal, Radford, and Klimov]{schulman2017ppo}
+John Schulman, Filip Wolski, Prafulla Dhariwal, Alec Radford, and Oleg Klimov.
+\newblock Proximal policy optimization algorithms.
+\newblock \emph{arXiv preprint arXiv:1707.06347}, 2017.
+
+\bibitem[Silver et~al.(2016)Silver, Huang, Maddison, Guez, Sifre, van den Driessche, Schrittwieser, Antonoglou, Panneershelvam, Lanctot, Dieleman, Grewe, Nham, Kalchbrenner, Sutskever, Lillicrap, Leach, Kavukcuoglu, Graepel, and Hassabis]{silver2016alphago}
+David Silver, Aja Huang, Chris J. Maddison, Arthur Guez, Laurent Sifre, George van den Driessche, Julian Schrittwieser, Ioannis Antonoglou, Veda Panneershelvam, Marc Lanctot, et~al.
+\newblock Mastering the game of Go with deep neural networks and tree search.
+\newblock \emph{Nature}, 529:484--489, 2016.
+
+\bibitem[Thompson(1933)]{thompson1933}
+William R. Thompson.
+\newblock On the likelihood that one unknown probability exceeds another in view of the evidence of two samples.
+\newblock \emph{Biometrika}, 25(3--4):285--294, 1933.
+
+\bibitem[Torabi et~al.(2018)Torabi, Warnell, and Stone]{torabi2018bco}
+Faraz Torabi, Garrett Warnell, and Peter Stone.
+\newblock Behavioral cloning from observation.
+\newblock In \emph{Proceedings of IJCAI}, 2018.
+
+\bibitem[Vaswani et~al.(2017)Vaswani, Shazeer, Parmar, Uszkoreit, Jones, Gomez, Kaiser, and Polosukhin]{vaswani2017attention}
+Ashish Vaswani, Noam Shazeer, Niki Parmar, Jakob Uszkoreit, Llion Jones, Aidan N. Gomez, \L ukasz Kaiser, and Illia Polosukhin.
+\newblock Attention is all you need.
+\newblock In \emph{Advances in Neural Information Processing Systems}, 2017.
+
+\bibitem[Warnell et~al.(2018)Warnell, Waytowich, Lawhern, and Stone]{warnell2018deeptamer}
+Garrett Warnell, Nicholas R. Waytowich, Vernon J. Lawhern, and Peter Stone.
+\newblock Deep TAMER: Interactive agent shaping in high-dimensional state spaces.
+\newblock In \emph{Proceedings of AAAI}, 2018.
+
+\bibitem[Ziebart et~al.(2008)Ziebart, Maas, Bagnell, and Dey]{ziebart2008maxent}
+Brian D. Ziebart, Andrew Maas, J. Andrew Bagnell, and Anind K. Dey.
+\newblock Maximum entropy inverse reinforcement learning.
+\newblock In \emph{Proceedings of AAAI}, 2008.
+
+\end{thebibliography}
+
+\end{document}
